@@ -233,7 +233,7 @@ GUIDE_FRAME_WIDTH_PIX = MICROLENS_GUIDE_GEOMETRY["frame_width_pix"]
 GUIDE_EXPOSURE_S = 0.25
 GUIDE_READOUT_S = 0.0
 GUIDE_OBSERVING_DURATION_S = 6.0
-GUIDE_READOUT_NOISE_ADU_PER_PIX = 5.0
+GUIDE_READOUT_NOISE_E_PER_PIX = 5.0
 GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX = 10.0
 # 用户只给了暗电流+杂散光总和；两者都开启时，任意拆分都等价于同一个总泊松过程。
 GUIDE_DARK_CURRENT_E_PER_S_PER_PIX = GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX / 2.0
@@ -1000,7 +1000,7 @@ Working with this configuration:
 # read from it; geometry comes from et_focalplane/data_microlens above.
 config_xlsx_full_path = os.environ.get(
     "ET_CONFIG_XLSX",
-    str(Path(__file__).resolve().parent.parent / "config" / "et_100_det_inputs_1h.xlsx"),
+    str(Path(__file__).resolve().parent.parent / "config" / "et_inputs_microlens_guider.xlsx"),
 )
 runtime_config_xlsx_full_path = build_runtime_config_xlsx(
     source_path=config_xlsx_full_path,
@@ -1020,8 +1020,8 @@ config_manager.parameters["Pixel Width"] = GUIDE_PIXEL_WIDTH_UM * u.um
 config_manager.parameters["Exposure Duration"] = GUIDE_EXPOSURE_S * u.s
 config_manager.parameters["Readout Duration"] = GUIDE_READOUT_S * u.s
 config_manager.parameters["Observing Duration"] = GUIDE_OBSERVING_DURATION_S * u.s
-config_manager.parameters["Readout Noise"] = GUIDE_READOUT_NOISE_ADU_PER_PIX * (
-    u.adu / u.pix
+config_manager.parameters["Readout Noise"] = GUIDE_READOUT_NOISE_E_PER_PIX * (
+    u.electron / u.pix
 )
 config_manager.parameters["Background Flux"] = GUIDE_BACKGROUND_FLUX_E_PER_S_PER_PIX * (
     u.electron / u.s / u.pix
@@ -1184,11 +1184,8 @@ _meta.update(
             .to(u.electron / u.s / u.pix)
             .value
         ),
-        "readout_noise_adu_per_pix": float(
-            config_manager.parameters["Readout Noise"].to(u.adu / u.pix).value
-        ),
         "readout_noise_e_per_pix": float(
-            config_manager.parameters["Readout Noise"].to(u.adu / u.pix).value
+            config_manager.parameters["Readout Noise"].to(u.electron / u.pix).value
         ),
         "gain_adu_per_electron": 1.0,
         "inter_prv_rms_percent": float(

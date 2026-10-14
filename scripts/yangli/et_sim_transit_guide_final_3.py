@@ -466,15 +466,15 @@ MAX_SIM_STARS = None #200 #***
 # - 暗星区间(G >= GAIA_GMAG_LIM_MIN)，取 top N_faint；
 # - 合并两组，target星(索引0)始终保留。
 # - N_bright, N_faint 可参数化。
-GUIDE_TOP_BRIGHT = 150  # G < GAIA_GMAG_LIM_MIN 区间取多少颗
-GUIDE_TOP_FAINT = 200   # G >= GAIA_GMAG_LIM_MIN 区间取多少颗
+GUIDE_TOP_BRIGHT = 350  # G < GAIA_GMAG_LIM_MIN 区间取多少颗
+GUIDE_TOP_FAINT = 0   # G >= GAIA_GMAG_LIM_MIN 区间取多少颗
 GUIDE_MIN_CATALOG_STARS = GUIDE_TOP_BRIGHT + GUIDE_TOP_FAINT  # 用于查询深度
 
 # 3.2.2) 导星“亮端”星等限制（Kepler Mag）。
 # 设为 10.0 表示仅保留 Gaia G Mag >= 10 的星（不选更亮的星）。
 # 设为 None 可关闭该限制。
 # 也可用环境变量 ET_GAIA_GMAG_LIM_MIN 覆盖（例如 10 或 None）。
-GAIA_GMAG_LIM_MIN = 11  # None  #10.0
+GAIA_GMAG_LIM_MIN = 99 #10.5  # None  #10.0
 
 # 3.3) 是否对整幅星场施加静态亚像元偏移。
 # - False：默认关闭，便于把星表真值与像面真值严格对齐，适合导星精度评估。
@@ -900,7 +900,7 @@ def build_variant_settings(**overrides):
         enable_scattered_light=True,
         enable_dark_current=True,
         enable_readout_noise=True,
-        enable_gain=False,
+        enable_gain=True,
         enable_whole_pixel_gain_normal_distribution=False,
         enable_whole_pixel_gain_sinusoidal_modulation=False,
         enable_target_star=True,
@@ -1791,8 +1791,9 @@ len(jit_spec_mask), jit_spec_mask.sum(), len(drift_spec_mask), drift_spec_mask.s
 
 TESS_PSD_PATH = env_str(
     "ET_TESS_PSD_PATH",
-    "/home/liyang/ET7/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz_scaled_to_1p8arcsec_10s.pkl",
-    #"/home/liyang/ET7/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz_amp12x.pkl",
+    "/home/liyang/ET7/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz_within_1s_scaled_to_0p12arcsec.pkl",
+    #"/home/liyang/ET7/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz_within_1s_scaled_to_0p6arcsec.pkl",
+    #"/home/liyang/ET7/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz.pkl",
 )
 if not os.path.isfile(TESS_PSD_PATH):
     raise FileNotFoundError(f"TESS jitter PSD not found: {TESS_PSD_PATH}")
@@ -2577,12 +2578,18 @@ stars = Stars()
 optical_eff_dpct = (
     simulator.sim_config["Optical Efficiency Ratio"].to(u.percent).value / 100
 )
+et_quantum_efficiency_dpct = 0.7
+if "ET Quantum Efficiency" in simulator.sim_config:
+    et_quantum_efficiency_dpct = (
+        simulator.sim_config["ET Quantum Efficiency"].to(u.percent).value / 100
+    )
 stars.build_catalog(
     star_data,
     simulator.time_manager.sim_exposure,
     optical_eff_dpct,
     simulator.relative_aperture_area,
     mag_type=simulator.mag_type,
+    et_quantum_efficiency=et_quantum_efficiency_dpct,
 )
 
 field_id = psf_field_id  # Which PSF ID to use? Keep catalog/ray generation consistent with the selected PSF.

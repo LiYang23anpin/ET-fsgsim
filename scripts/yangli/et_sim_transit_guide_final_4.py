@@ -1,86 +1,83 @@
+# 关闭了frame_to_frame_drift，可在full_3.py中使用环境变量 ET_ENABLE_FRAME_TO_FRAME_DRIFT=1 来开启。
+
 import sys
 import types
 from pathlib import Path
 import os
 
-PHOTSIM_ROOT = os.environ.get("PHOTSIM7_ROOT", "/home/cxgao/ET/Photsim7")
-
-# 让 Python 能找到同事的源码目录（但不需要安装到环境）
-if PHOTSIM_ROOT not in sys.path:
-    sys.path.insert(0, PHOTSIM_ROOT)
-
-# 避免当前会话里已经加载过旧的 photsim6（很关键）
+# photsim6 兼容导入层：默认使用 Photsim7 的 photsim6 compatibility shim。
+PHOTSIM7_ROOT_CANDIDATES = [
+    os.environ.get("ET_PHOTSIM7_ROOT"),
+    "/home/liyang/ET7/Photsim7",
+]
+PHOTSIM7_ROOT = next(
+    (path for path in PHOTSIM7_ROOT_CANDIDATES if path and os.path.isdir(path)),
+    None,
+)
+if PHOTSIM7_ROOT is None:
+    raise FileNotFoundError(
+        "未找到 Photsim7 源码目录；请设置 ET_PHOTSIM7_ROOT。"
+    )
+if PHOTSIM7_ROOT not in sys.path:
+    sys.path.insert(0, PHOTSIM7_ROOT)
 for m in list(sys.modules):
     if m == "photsim6" or m.startswith("photsim6."):
         sys.modules.pop(m)
+print(f"[Photsim core] using Photsim7 via photsim6 compatibility shim: {PHOTSIM7_ROOT}")
 
-# 重要：不要 `import photsim7` 顶层包。
-# 因为 photsim7/__init__.py 会导入 dashboard/dash；如果你的环境没装 dash，会直接崩。
-# 我们在这里创建一个“轻量包别名” photsim6，把它的搜索路径指向当前 Photosim 源码目录：
-# 这样 `import photsim6.simulator` 等会正常加载，但不会执行 photsim7/__init__.py。
-_photsim_root_path = Path(PHOTSIM_ROOT)
-_photsim7_src_dir = _photsim_root_path / "photsim7"
-if not _photsim7_src_dir.exists():
-    raise FileNotFoundError(f"Could not find Photosim7 package source: {_photsim7_src_dir}")
-PHOTSIM6_SRC_DIR = str(_photsim7_src_dir)
-photsim6_alias_pkg = types.ModuleType("photsim6")
-photsim6_alias_pkg.__path__ = [PHOTSIM6_SRC_DIR]
-photsim6_alias_pkg.__package__ = "photsim6"
-sys.modules["photsim6"] = photsim6_alias_pkg
+PHOTSIM7_DATA_DIR_CANDIDATES = [
+    os.environ.get("ET_PHOTSIM7_DATA_DIR"),
+    "/home/liyang/ET7/Photsim7-data",
+]
+PHOTSIM7_DATA_DIR = next(
+    (path for path in PHOTSIM7_DATA_DIR_CANDIDATES if path and os.path.isdir(path)),
+    None,
+)
+if PHOTSIM7_DATA_DIR is None:
+    raise FileNotFoundError(
+        "未找到 Photsim7 数据目录；请设置 ET_PHOTSIM7_DATA_DIR。"
+    )
+os.environ["ET_DATA_DIR"] = PHOTSIM7_DATA_DIR
+print(f"[Photsim core] ET_DATA_DIR={os.environ['ET_DATA_DIR']}")
 
-# photsim simulator.py 会 import dashboard.py；而 dashboard.py 依赖 dash。
-# 本脚本始终使用 start_ray=False，不需要 dashboard 真正工作。
-# 若当前环境未安装 dash，则注入一个最小 stub，避免 import 时崩溃。
+# dash stub（防止未装 dash 崩溃）
 try:
-    import dash  # type: ignore  # noqa: F401
+    import dash
 except Exception:
     dash_stub = types.ModuleType("dash")
-
-    def _dash_component(*args, **kwargs):
-        return {"args": args, "kwargs": kwargs}
-
+    def _dash_component(*args, **kwargs): return {"args": args, "kwargs": kwargs}
     class _DashNamespace:
-        def __getattr__(self, name):
-            return _dash_component
-
+        def __getattr__(self, name): return _dash_component
     class _DummyDashApp:
-        def __init__(self, *args, **kwargs):
-            self.server = None
-            self.layout = None
-            self.index_string = ""
-
-        def callback(self, *args, **kwargs):
-            def _decorator(func):
-                return func
-
-            return _decorator
-
-        def run(self, *args, **kwargs):
-            return None
-
+        def __init__(self, *args, **kwargs): pass
+        def callback(self, *args, **kwargs): return lambda f: f
+        def run(self, *args, **kwargs): return None
     dash_stub.Dash = _DummyDashApp
     dash_stub.html = _DashNamespace()
     dash_stub.dcc = _DashNamespace()
     dash_stub.dash_table = _DashNamespace()
     sys.modules["dash"] = dash_stub
-
     dash_dependencies = types.ModuleType("dash.dependencies")
     dash_dependencies.Input = _dash_component
     dash_dependencies.Output = _dash_component
     sys.modules["dash.dependencies"] = dash_dependencies
-
     dash_exceptions = types.ModuleType("dash.exceptions")
-
-    class _PreventUpdate(Exception):
-        pass
-
+    class _PreventUpdate(Exception): pass
     dash_exceptions.PreventUpdate = _PreventUpdate
     sys.modules["dash.exceptions"] = dash_exceptions
 
-import subprocess
-from openpyxl import load_workbook
+### 基于Photosim6ft/et_sim_guide_v2_jitter_filtstar_motion_addbright.py修改了选星规则：
+'''
+步骤
 
-os.environ["ET_DATA_DIR"] = os.environ.get("ET_DATA_DIR", r"/home/cxgao/ET/Photsim7-data")
+查询星表时直接获取 G<14 的所有星。
+新增两个参数：N_FAINT（默认150）、N_BRIGHT（默认160），用于控制两组topK数量。
+用 Gaia G Mag 字段分组：
+暗星：11≤G<14，按星等升序排序，取前N_FAINT颗。
+亮星：G<11，按星等升序排序，取前N_BRIGHT颗。
+'''
+
+import subprocess
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -149,7 +146,7 @@ def surface_brightness_mag_per_arcsec2_to_flux_per_pix(
     """Convert ET surface brightness to per-pixel electron rate.
 
     The conversion uses the same ET zero point already hard-coded in
-    `photsim6.field.Stars.build_catalog()` to keep stars and diffuse
+    `photsim6ft.field.Stars.build_catalog()` to keep stars and diffuse
     background on a consistent flux scale.
     """
 
@@ -166,29 +163,47 @@ def surface_brightness_mag_per_arcsec2_to_flux_per_pix(
 # ============================================================================
 GUIDE_PIXEL_SCALE_ARCSEC_PER_PIX = 3.146
 GUIDE_PIXEL_WIDTH_UM = 6.5
-GUIDE_FOV_DEG = 1.7
+GUIDE_FOV_DEG = 1.79   ## 1.7
 GUIDE_EXPOSURE_S = 0.25
 GUIDE_READOUT_S = 0.0
-GUIDE_OBSERVING_DURATION_S = 6.0
+GUIDE_OBSERVING_DURATION_S = 15  #***
 GUIDE_READOUT_NOISE_ADU_PER_PIX = 5.0
-GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX = 10.0
-# 用户只给了暗电流+杂散光总和；两者都开启时，任意拆分都等价于同一个总泊松过程。
-GUIDE_DARK_CURRENT_E_PER_S_PER_PIX = GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX / 2.0
-GUIDE_SCATTERED_LIGHT_E_PER_S_PER_PIX = GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX / 2.0
-GUIDE_INTER_PRV_RMS_PERCENT = 3.0
-GUIDE_BACKGROUND_SURFACE_BRIGHTNESS_MAG_PER_ARCSEC2 = 22.0
-GUIDE_BACKGROUND_FLUX_E_PER_S_PER_PIX = (
-    surface_brightness_mag_per_arcsec2_to_flux_per_pix(
-        GUIDE_BACKGROUND_SURFACE_BRIGHTNESS_MAG_PER_ARCSEC2,
-        GUIDE_PIXEL_SCALE_ARCSEC_PER_PIX,
-    )
+GUIDE_GAIN_ELECTRONS_PER_ADU = 1/2.2
+GUIDE_READOUT_NOISE_E_PER_PIX = (
+    GUIDE_READOUT_NOISE_ADU_PER_PIX * GUIDE_GAIN_ELECTRONS_PER_ADU
 )
+GUIDE_FULL_WELL_ELECTRONS = 1800.0
+GUIDE_ADC_BIT_DEPTH = 12
+GUIDE_BIAS_LEVEL_ADU = 135.0
+GUIDE_COLUMN_NOISE_SIGMA_ADU = 0.0
+GUIDE_ENABLE_COSMIC_RAYS = False
+GUIDE_SUBTRACT_NONSTELLAR_MEAN = False
+# GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX = 10.0
+# 用户只给了暗电流+杂散光总和；两者都开启时，任意拆分都等价于同一个总泊松过程。
+GUIDE_DARK_CURRENT_E_PER_S_PER_PIX = 0.7
+#GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX / 2.0  #0.7  
+GUIDE_SCATTERED_LIGHT_E_PER_S_PER_PIX = 2.11 #GUIDE_DARK_PLUS_SCATTERED_E_PER_S_PER_PIX / 2.0  #2.11  
+GUIDE_INTER_PRV_RMS_PERCENT = 3.0
+# GUIDE_BACKGROUND_SURFACE_BRIGHTNESS_MAG_PER_ARCSEC2 = 22.0
+# GUIDE_BACKGROUND_FLUX_E_PER_S_PER_PIX = (
+#     surface_brightness_mag_per_arcsec2_to_flux_per_pix(
+#         GUIDE_BACKGROUND_SURFACE_BRIGHTNESS_MAG_PER_ARCSEC2,
+#         GUIDE_PIXEL_SCALE_ARCSEC_PER_PIX,
+#     )
+# )
 GUIDE_PSF_FIELD_ANGLE_DEG = 14.0
 GUIDE_PSF_FIELD_ID = 7
+GUIDE_OPTICAL_EFFICIENCY_RATIO_DEFAULT = 0.5
+GUIDE_ET_QUANTUM_EFFICIENCY_DEFAULT = 0.7
+# 默认 PSF bundle；不设环境变量时直接使用这里。
+# 示例："Photosim6/data/psf/et/241006/D280mm-focus"
+# PSF_BUNDLE_NAME_DEFAULT = "241006/D280mm-focus"
+PSF_BUNDLE_NAME_DEFAULT = "241006/D280mm-defocus(-0.03mm)-guide6p5um"
+#"241006/D280mm-focus-guide6p5um" # 凌星导星
 
 
 # ============================================================================
-# 用户可改的“导星探测器仿真”关键设置（本脚本层实现，不改 Photosim7 包）
+# 用户可改的“导星探测器仿真”关键设置（本脚本层实现，不改 photsim6ft 包）
 # ============================================================================
 # 1) 单个导星探测器视场。
 FOV_DEG = GUIDE_FOV_DEG
@@ -201,18 +216,10 @@ FIELD_CENTERS_DEG = [
     (305.03563, 38.47553),
 ]
 
-# 是否一次性顺序跑完多个 batch。
-# - True：当前脚本会自动按 BATCH_INDICES_TO_RUN 逐个拉起子进程。
-# - False：仅运行当前 FIELD_CENTER_INDEX 指定的单个 batch。
+# ===== 批量 batch 机制（兼容 v2_jitter_filtstar_motion.py） =====
 RUN_ALL_BATCHES = True
-
-# 指定需要运行的 batch 索引；None 表示跑完 FIELD_CENTERS_DEG 中的全部中心。
-# 例如只跑 batch0 和 batch2，可改成 [0, 2]。
-BATCH_INDICES_TO_RUN = None
-
-# 当前批次索引：0/1/2/3
+BATCH_INDICES_TO_RUN = None  # None 表示全部 batch
 FIELD_CENTER_INDEX = 0
-
 _FIELD_CENTER_INDEX_ENV = os.environ.get("ET_FIELD_CENTER_INDEX")
 if _FIELD_CENTER_INDEX_ENV is not None:
     FIELD_CENTER_INDEX = int(_FIELD_CENTER_INDEX_ENV)
@@ -221,28 +228,21 @@ IS_CHILD_BATCH_RUN = os.environ.get("ET_CHILD_BATCH_RUN") == "1"
 _RUN_ALL_BATCHES_ENV = os.environ.get("ET_RUN_ALL_BATCHES")
 if _RUN_ALL_BATCHES_ENV is not None:
     RUN_ALL_BATCHES = _RUN_ALL_BATCHES_ENV.strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
+        "1", "true", "yes", "y", "on"
     }
 
-
-def run_all_batches_sequentially() -> None:
+def run_all_batches_sequentially():
     batch_indices = (
         list(range(len(FIELD_CENTERS_DEG)))
         if BATCH_INDICES_TO_RUN is None
         else [int(idx) for idx in BATCH_INDICES_TO_RUN]
     )
-
     invalid = [idx for idx in batch_indices if not (0 <= idx < len(FIELD_CENTERS_DEG))]
     if invalid:
         raise ValueError(
             f"BATCH_INDICES_TO_RUN 中存在越界索引 {invalid}；"
             f"合法范围应为 [0, {len(FIELD_CENTERS_DEG) - 1}]。"
         )
-
     script_path = str(Path(__file__).resolve())
     for batch_index in batch_indices:
         batch_ra_deg, batch_dec_deg = FIELD_CENTERS_DEG[batch_index]
@@ -254,7 +254,6 @@ def run_all_batches_sequentially() -> None:
         env["ET_CHILD_BATCH_RUN"] = "1"
         env["ET_FIELD_CENTER_INDEX"] = str(batch_index)
         subprocess.run([sys.executable, script_path], env=env, check=True)
-
 
 if RUN_ALL_BATCHES and not IS_CHILD_BATCH_RUN:
     run_all_batches_sequentially()
@@ -271,6 +270,159 @@ print(
     f"[Sky center] batch={FIELD_CENTER_INDEX}  RA={FIELD_CENTER_RA_DEG:.6f} deg  DEC={FIELD_CENTER_DEC_DEG:.6f} deg"
 )
 
+# 1.6) 可选：热弹效应，四个导星探测器的周期性径向外扩位移。
+# - 每 10 秒为一个周期；
+# - 周期内最后 3 秒，对当前 batch 对应的导星探测器施加一次固定的“向外”位移；
+# - 其余时间恢复为 0。
+# 位移量以角秒给出，脚本内部会自动转换为像素。
+#
+# 环境变量用法示例：
+#   ET_ENABLE_PERIODIC_RADIAL_EXPANSION=1 \
+#   ET_RADIAL_EXPANSION_PERIOD_S=10 \
+#   ET_RADIAL_EXPANSION_ACTIVE_LAST_S=3 \
+#   ET_RADIAL_EXPANSION_ARCSEC=0.0054 \
+#   python3 et_sim_guide_v2_jitter_filtstar_motion.py
+#
+# 变量含义：
+# - ET_ENABLE_PERIODIC_RADIAL_EXPANSION：总开关，1 开 0 关；
+# - ET_RADIAL_EXPANSION_PERIOD_S：一个完整周期的长度；
+# - ET_RADIAL_EXPANSION_ACTIVE_LAST_S：每个周期末尾“激活”的秒数；
+# - ET_RADIAL_EXPANSION_ARCSEC：相对位移幅度，单位 arcsec。
+ENABLE_PERIODIC_RADIAL_EXPANSION = False
+RADIAL_EXPANSION_PERIOD_S = 10.0
+RADIAL_EXPANSION_ACTIVE_LAST_S = 3.0
+RADIAL_EXPANSION_ARCSEC = 0.0054  # 幅度（0.0054 arcsec ≈ 0.0017 pix）
+
+# 整幅视场中心定义：
+# - 设为 None: 自动使用 4 个 FIELD_CENTERS_DEG 的几何均值作为“整幅视场中心”；
+# - 设为数值: 显式指定整幅视场中心 (RA, DEC) [deg]。
+RADIAL_EXPANSION_FOV_CENTER_RA_DEG = None
+RADIAL_EXPANSION_FOV_CENTER_DEC_DEG = None
+
+# 可选：手动覆盖 4 片探测器外扩方向（按 FIELD_CENTERS_DEG 顺序）。
+# - 每项为 (dx, dy) 或 None。
+# - None: 使用“相对整幅视场中心”的自动方向。
+# - (dx, dy): 使用你指定的方向和符号（会自动归一化，幅值由 RADIAL_EXPANSION_ARCSEC 控制）。
+# 例如把第 0 片设为朝 +x 方向外扩：MANUAL_DETECTOR_DIRECTION_DXDY[0] = (1.0, 0.0)
+MANUAL_DETECTOR_DIRECTION_DXDY = [
+    (1.0, 0.0),
+    (0.0, 1.0),
+    (1.0, 0.0),
+    (0.0, 1.0),
+]
+
+
+def compute_field_center_radial_unit_vectors(
+    field_centers_deg,
+    fov_center_ra_deg=None,
+    fov_center_dec_deg=None,
+):
+    """Compute outward unit vectors for each guide detector center in tangent-plane coords."""
+
+    centers = np.asarray(field_centers_deg, dtype=float)
+    if fov_center_ra_deg is None:
+        center_ra_deg = float(np.mean(centers[:, 0]))
+    else:
+        center_ra_deg = float(fov_center_ra_deg)
+
+    if fov_center_dec_deg is None:
+        center_dec_deg = float(np.mean(centers[:, 1]))
+    else:
+        center_dec_deg = float(fov_center_dec_deg)
+
+    cos_dec = float(np.cos(np.deg2rad(center_dec_deg)))
+
+    radial_unit_vectors = []
+    for ra_deg, dec_deg in centers:
+        dx_deg = (float(ra_deg) - center_ra_deg) * cos_dec
+        dy_deg = float(dec_deg) - center_dec_deg
+        radius = float(np.hypot(dx_deg, dy_deg))
+        if radius == 0.0:
+            radial_unit_vectors.append((0.0, 0.0))
+        else:
+            radial_unit_vectors.append((dx_deg / radius, dy_deg / radius))
+
+    return radial_unit_vectors
+
+
+def _normalize_direction_vector(dx, dy):
+    norm = float(np.hypot(float(dx), float(dy)))
+    if norm == 0.0:
+        raise ValueError("手动方向向量 (dx, dy) 不能是 (0, 0)。")
+    return float(dx) / norm, float(dy) / norm
+
+
+def resolve_detector_expansion_unit_vector(
+    detector_index,
+    auto_unit_vectors,
+    manual_directions,
+):
+    if len(manual_directions) != len(auto_unit_vectors):
+        raise ValueError(
+            "MANUAL_DETECTOR_DIRECTION_DXDY 的长度必须与 FIELD_CENTERS_DEG 一致。"
+        )
+
+    manual_item = manual_directions[detector_index]
+    if manual_item is None:
+        ux, uy = auto_unit_vectors[detector_index]
+        return float(ux), float(uy), "auto_fov_center"
+
+    if len(manual_item) != 2:
+        raise ValueError(
+            "MANUAL_DETECTOR_DIRECTION_DXDY 的每一项必须是 None 或 (dx, dy)。"
+        )
+
+    ux, uy = _normalize_direction_vector(manual_item[0], manual_item[1])
+    return ux, uy, "manual_dxdy"
+
+
+FIELD_CENTER_RADIAL_UNIT_VECTORS = compute_field_center_radial_unit_vectors(
+    FIELD_CENTERS_DEG,
+    fov_center_ra_deg=RADIAL_EXPANSION_FOV_CENTER_RA_DEG,
+    fov_center_dec_deg=RADIAL_EXPANSION_FOV_CENTER_DEC_DEG,
+)
+FIELD_CENTER_RADIAL_UNIT_X_DEG, FIELD_CENTER_RADIAL_UNIT_Y_DEG, _RADIAL_UNIT_SOURCE = (
+    resolve_detector_expansion_unit_vector(
+        detector_index=FIELD_CENTER_INDEX,
+        auto_unit_vectors=FIELD_CENTER_RADIAL_UNIT_VECTORS,
+        manual_directions=MANUAL_DETECTOR_DIRECTION_DXDY,
+    )
+)
+print(
+    "[Periodic radial expansion] "
+    f"source={_RADIAL_UNIT_SOURCE} "
+    f"batch={FIELD_CENTER_INDEX} radial_unit=("
+    f"{FIELD_CENTER_RADIAL_UNIT_X_DEG:+.6f}, {FIELD_CENTER_RADIAL_UNIT_Y_DEG:+.6f})"
+)
+
+
+def build_periodic_radial_expansion_pix(
+    time_s,
+    pixel_scale_arcsec_per_pix,
+    period_s,
+    active_last_s,
+    radial_arcsec,
+    radial_unit_x,
+    radial_unit_y,
+):
+    """Return per-frame x/y pixel offsets for the requested periodic radial expansion."""
+
+    time_s = np.asarray(time_s, dtype=float)
+    x_offset_pix = np.zeros_like(time_s, dtype=float)
+    y_offset_pix = np.zeros_like(time_s, dtype=float)
+
+    if period_s <= 0.0 or active_last_s <= 0.0 or radial_arcsec == 0.0:
+        return x_offset_pix, y_offset_pix
+
+    active_last_s = min(float(active_last_s), float(period_s))
+    phase_s = np.mod(time_s, float(period_s))
+    active_mask = phase_s >= (float(period_s) - active_last_s)
+    offset_pix = float(radial_arcsec) / float(pixel_scale_arcsec_per_pix)
+
+    x_offset_pix[active_mask] = offset_pix * float(radial_unit_x)
+    y_offset_pix[active_mask] = offset_pix * float(radial_unit_y)
+    return x_offset_pix, y_offset_pix
+
 # 2) drift-jitter 分界：以“单个 raw frame 的有效积分时间”作为时间尺度。
 #    - CCD：积分窗口 = Exposure Duration * Simulation Cadence Mult
 #    - CMOS：积分窗口 = (Exposure + Readout) * Simulation Cadence Mult
@@ -285,15 +437,15 @@ USE_CADENCE_SPLIT = True
 SPLIT_HZ_OVERRIDE = None
 
 # 3) 导星星表查询深度：
-# - 先从 Gaia G=11 开始查；
+# - 先从 Gaia G=GAIA_GMAG_LIM 开始查；
 # - 若该视场内星数不足目标值，则逐步放宽到更暗的星；
 # - 只把最亮的若干颗送进仿真，避免逐星 PSF 叠加过慢。
-GAIA_GMAG_LIM = 11.0
+GAIA_GMAG_LIM = 12.5
 GAIA_GMAG_LIM_STEP = 0.5
-GAIA_GMAG_LIM_MAX = 16.0
+GAIA_GMAG_LIM_MAX = 14
 GUIDE_STAR_QUERY_BACKEND = "et_focalplane"
-GUIDE_GAIA_CATALOG_DIR = os.environ.get("GUIDE_GAIA_CATALOG_DIR", "/home/cxgao/gaia_dr3_19mag")
-ET_FOCALPLANE_ROOT = os.environ.get("ET_FOCALPLANE_ROOT", "/home/cxgao/ET/et_focalplane")
+GUIDE_GAIA_CATALOG_DIR = "/home/liyang/ETguider/gaia_dr3_19mag"
+ET_FOCALPLANE_ROOT = "/home/liyang/ET7/et_focalplane"
 ET_FOCALPLANE_DATA_DIR = str(Path(ET_FOCALPLANE_ROOT) / "data")
 ET_FOCALPLANE_SRC_DIR = str(Path(ET_FOCALPLANE_ROOT) / "src")
 GUIDE_QUERY_TARGET_EPOCH = 2000.0
@@ -307,16 +459,25 @@ FIELD_POLAR_ANGLE_DEG = GUIDE_PSF_FIELD_ANGLE_DEG
 FIELD_POLAR_ANGLE_RAD = float(np.deg2rad(FIELD_POLAR_ANGLE_DEG))
 
 # 3.2) 星数上限（重要的性能开关）
-# Photosim7 的 `generate_background_starlight_frames` 会对每颗星逐个生成 PSF 并累加，
+# photsim6ft 的 `generate_background_starlight_frames` 会对每颗星逐个生成 PSF 并累加，
 # 星数一旦上千，每帧耗时会非常夸张，GPU 上还可能触发 watchdog timeout。
 # 为避免大视场下逐星 PSF 叠加过慢，这里默认只保留最亮的若干颗星（包含 target 星）。
-MAX_SIM_STARS = 200
+MAX_SIM_STARS = None #200 #***
 
 # 3.2.1) 导星星表选择规则：
-# - 每个 batch 目标至少 150 颗星
-# - 若 11 等内不足，则自动放宽最暗星限制，直到凑够目标值或达到查询上限
-# - 最终仍受 MAX_SIM_STARS 限制，默认保留最亮的 200 颗（包含 target 星）
-GUIDE_MIN_CATALOG_STARS = 150
+# - 亮星区间(G < GAIA_GMAG_LIM_MIN)，取 top N_bright；
+# - 暗星区间(G >= GAIA_GMAG_LIM_MIN)，取 top N_faint；
+# - 合并两组，target星(索引0)始终保留。
+# - N_bright, N_faint 可参数化。
+GUIDE_TOP_BRIGHT = 350  # G < GAIA_GMAG_LIM_MIN 区间取多少颗
+GUIDE_TOP_FAINT = 0   # G >= GAIA_GMAG_LIM_MIN 区间取多少颗
+GUIDE_MIN_CATALOG_STARS = GUIDE_TOP_BRIGHT + GUIDE_TOP_FAINT  # 用于查询深度
+
+# 3.2.2) 导星“亮端”星等限制（Kepler Mag）。
+# 设为 10.0 表示仅保留 Gaia G Mag >= 10 的星（不选更亮的星）。
+# 设为 None 可关闭该限制。
+# 也可用环境变量 ET_GAIA_GMAG_LIM_MIN 覆盖（例如 10 或 None）。
+GAIA_GMAG_LIM_MIN = 99 #10.5  # None  #10.0
 
 # 3.3) 是否对整幅星场施加静态亚像元偏移。
 # - False：默认关闭，便于把星表真值与像面真值严格对齐，适合导星精度评估。
@@ -334,10 +495,12 @@ REQUESTED_COMPUTE_DEVICE = "cuda"
 # 4) 产物输出根目录（你可指定到任意磁盘/目录）：
 #    你希望“所有产品”都落在一个确定位置。这里的 OUTPUT_ROOT 就是那个最上层目录。
 #    脚本会在其下创建更细的子目录结构（你说子目录怎么组织无所谓）。
-OUTPUT_ROOT = "/home/cxgao/Results/FSG_guide_sims"
+
+OUTPUT_ROOT = "/home/liyang/ET7/Results/Transit/Simulation/"
+
 
 # 本次运行的名字（目录名的一部分），建议你按项目/日期/参数命名，便于检索。
-OUTPUT_RUN_NAME = "guide_det_v1_noise_psf_6s"
+OUTPUT_RUN_NAME = "guide_full_10p5mag" #"guide_det_v1_noise_psf_6s"
 
 # 是否启用流式落盘：每帧（或极小批次）生成后立刻写入 .npz，避免内存累计。
 STREAM_SAVE_FRAMES = True
@@ -384,12 +547,41 @@ def env_int(name: str, default=None):
     return int(value)
 
 
+_GLOBAL_SEED_ENV = os.environ.get("GLOBAL_SEED")
+GLOBAL_SEED = env_int("GLOBAL_SEED", GLOBAL_SEED)
+if _GLOBAL_SEED_ENV not in (None, ""):
+    print(f"[Seed] Using GLOBAL_SEED={GLOBAL_SEED} (from env)")
+
+
+
+
+def env_float_or_none(name: str, default=None):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    if value == "":
+        return default
+    if value.lower() in {"none", "null"}:
+        return None
+    return float(value)
+
+
 def env_str(name: str, default: str) -> str:
     value = os.environ.get(name)
     if value is None:
         return default
     value = value.strip()
     return value if value else default
+
+
+def efficiency_to_percent_quantity(value: float, name: str):
+    factor = float(value)
+    if factor < 0.0:
+        raise ValueError(f"{name} 不能为负数：{value}")
+    if factor <= 1.0:
+        factor *= 100.0
+    return factor * u.percent
 
 
 def resolve_field_offsets(
@@ -475,178 +667,233 @@ def enrich_star_data_truth_columns(star_data: dict) -> dict:
     return enriched
 
 
-def select_guide_star_indices(
-    star_df,
-    min_catalog_stars: int,
-    max_sim_stars: int | None,
-):
-    """Select the brightest guide stars, preserving target star at index 0."""
+# def select_guide_star_indices(
+#     star_df,
+#     min_catalog_stars: int,
+#     max_sim_stars: int | None,
+#     min_gaia_gmag: float | None = None,
+# ):
+#     """Build dual selections for simulation and guiding.
 
-    mags = np.asarray(star_df["Kepler Mag"], dtype=float)
-    if mags.size == 0:
-        raise ValueError("空星表无法用于导星仿真。")
+#     Rules:
+#     1) Guide candidates are selected only from faint stars (Gaia G >= min_gaia_gmag).
+#     2) Simulation uses all bright stars (Gaia G < min_gaia_gmag) plus selected guide candidates.
+#     3) Keep target star (index 0) as the first simulation star whenever present.
+#     """
 
-    candidate_idx = np.arange(mags.size, dtype=int)
+#     if "Gaia G Mag" not in star_df.colnames:
+#         raise ValueError("星表缺少 'Gaia G Mag' 列，无法按 Gaia G 星等做筛选。")
 
-    # 目标星始终保留在第 0 行，避免破坏 Photosim 的 target/background 约定。
-    keep = [0]
-    for idx in candidate_idx[np.argsort(mags[candidate_idx])].tolist():
-        if idx == 0:
-            continue
-        keep.append(idx)
+#     mags = np.asarray(star_df["Gaia G Mag"], dtype=float)
+#     if mags.size == 0:
+#         raise ValueError("空星表无法用于导星仿真。")
 
-    n_available = len(keep)
+#     all_idx = np.arange(mags.size, dtype=int)
+#     candidate_idx = all_idx
+#     bright_idx = np.asarray([], dtype=int)
+#     if min_gaia_gmag is not None:
+#         min_g = float(min_gaia_gmag)
+#         candidate_idx = all_idx[mags[all_idx] >= min_g]
+#         bright_idx = all_idx[mags[all_idx] < min_g]
 
-    if max_sim_stars is not None and max_sim_stars > 0 and len(keep) > max_sim_stars:
-        keep = keep[: int(max_sim_stars)]
+#     if candidate_idx.size == 0:
+#         raise ValueError(
+#             f"按 Gaia G Mag >= {float(min_gaia_gmag):.3f} 过滤后无可用星。"
+#         )
 
-    return {
-        "keep_indices": np.asarray(keep, dtype=int),
-        "mags_all": mags,
-        "n_available": int(n_available),
-        "n_selected": int(len(keep)),
-        "selected_faintest_mag": float(np.max(mags[np.asarray(keep, dtype=int)])),
-        "meets_min_count": bool(n_available >= int(min_catalog_stars)),
-    }
+#     target_included = bool(np.any(candidate_idx == 0))
+#     keep = [0] if target_included else []
+#     for idx in candidate_idx[np.argsort(mags[candidate_idx])].tolist():
+#         if target_included and idx == 0:
+#             continue
+#         keep.append(idx)
+
+#     n_available = int(len(keep))
+#     n_filtered_bright = int(mags.size - candidate_idx.size)
+
+#     if max_sim_stars is not None and max_sim_stars > 0 and len(keep) > max_sim_stars:
+#         keep = keep[: int(max_sim_stars)]
+
+#     guide_keep_arr = np.asarray(keep, dtype=int)
+
+#     sim_keep = []
+#     if mags.size > 0:
+#         sim_keep.append(0)
+
+#     if bright_idx.size > 0:
+#         for idx in bright_idx[np.argsort(mags[bright_idx])].tolist():
+#             if idx == 0:
+#                 continue
+#             sim_keep.append(int(idx))
+
+#     for idx in guide_keep_arr.tolist():
+#         if idx in sim_keep:
+#             continue
+#         sim_keep.append(int(idx))
+
+#     sim_keep_arr = np.asarray(sim_keep, dtype=int)
+#     guide_mask_in_sim = np.isin(sim_keep_arr, guide_keep_arr)
+
+#     return {
+#         "keep_indices": sim_keep_arr,
+#         "guide_keep_indices": guide_keep_arr,
+#         "guide_mask_in_sim": guide_mask_in_sim,
+#         "mags_all": mags,
+#         "n_available": int(n_available),
+#         "n_selected": int(len(guide_keep_arr)),
+#         "n_sim_selected": int(len(sim_keep_arr)),
+#         "n_guide_selected": int(len(guide_keep_arr)),
+#         "n_bright_added_to_sim": int(np.sum(np.isin(sim_keep_arr, bright_idx))),
+#         "n_filtered_bright": int(n_filtered_bright),
+#         "min_gaia_gmag": (
+#             None if min_gaia_gmag is None else float(min_gaia_gmag)
+#         ),
+#         "target_included": bool(target_included),
+#         "selected_brightest_mag": float(np.min(mags[guide_keep_arr])),
+#         "selected_faintest_mag": float(np.max(mags[guide_keep_arr])),
+#         "sim_brightest_mag": float(np.min(mags[sim_keep_arr])),
+#         "sim_faintest_mag": float(np.max(mags[sim_keep_arr])),
+#         "meets_min_count": bool(n_available >= int(min_catalog_stars)),
+#     }
 
 
-def query_guide_star_field_adaptive(
-    *,
-    ra,
-    dec,
-    px_cnt,
-    px_scale,
-    apply_offset: bool,
-    plot: bool,
-    offset_x_pix,
-    offset_y_pix,
-    base_gaia_gmag_lim: float,
-    min_catalog_stars: int,
-    gaia_gmag_step: float,
-    gaia_gmag_lim_max: float,
-    query_backend: str,
-    catalog_dir: str | None,
-    et_focalplane_data_dir: str | None,
-    et_focalplane_src_dir: str | None,
-    target_epoch: float,
-    crop_to_simulation_frame: bool,
-    crop_margin_pix: float,
-):
-    """Query Gaia repeatedly, relaxing the magnitude limit until enough stars are found."""
+# def query_guide_star_field_adaptive(
+#     *,
+#     ra,
+#     dec,
+#     px_cnt,
+#     px_scale,
+#     apply_offset: bool,
+#     plot: bool,
+#     offset_x_pix,
+#     offset_y_pix,
+#     base_gaia_gmag_lim: float,
+#     min_catalog_stars: int,
+#     gaia_gmag_step: float,
+#     gaia_gmag_lim_max: float,
+#     query_backend: str,
+#     catalog_dir: str | None,
+#     et_focalplane_data_dir: str | None,
+#     et_focalplane_src_dir: str | None,
+#     target_epoch: float,
+#     crop_to_simulation_frame: bool,
+#     crop_margin_pix: float,
+# ):
+#     """Query Gaia repeatedly, relaxing the magnitude limit until enough stars are found."""
 
-    resolved_offset_x_pix, resolved_offset_y_pix = resolve_field_offsets(
-        apply_offset=apply_offset,
-        offset_x_pix=offset_x_pix,
-        offset_y_pix=offset_y_pix,
-    )
+#     resolved_offset_x_pix, resolved_offset_y_pix = resolve_field_offsets(
+#         apply_offset=apply_offset,
+#         offset_x_pix=offset_x_pix,
+#         offset_y_pix=offset_y_pix,
+#     )
 
-    tried_limits = []
-    gaia_gmag_lim = float(base_gaia_gmag_lim)
-    star_data = None
-    backend = query_backend.strip().lower()
+#     tried_limits = []
+#     gaia_gmag_lim = float(base_gaia_gmag_lim)
+#     star_data = None
+#     backend = query_backend.strip().lower()
 
-    while True:
-        if backend == "et_focalplane":
-            star_data = mk_real_field_stars_et_focalplane(
-                target_ra=ra,
-                target_dec=dec,
-                catalog_dir=catalog_dir or GUIDE_GAIA_CATALOG_DIR,
-                registry_data_dir=et_focalplane_data_dir or ET_FOCALPLANE_DATA_DIR,
-                px_cnt=px_cnt,
-                apply_offset=apply_offset,
-                mag_lim=gaia_gmag_lim,
-                plot=False,
-                offset_x_pix=resolved_offset_x_pix,
-                offset_y_pix=resolved_offset_y_pix,
-                target_epoch=target_epoch,
-                crop_to_simulation_frame=crop_to_simulation_frame,
-                crop_margin_pix=crop_margin_pix,
-                et_focalplane_src=et_focalplane_src_dir or ET_FOCALPLANE_SRC_DIR,
-            )
-        elif backend == "legacy_box_gaia":
-            star_data = mk_real_field_stars_2(
-                ra=ra,
-                dec=dec,
-                px_cnt=px_cnt,
-                px_scale=px_scale,
-                apply_offset=apply_offset,
-                mag_lim=gaia_gmag_lim,
-                plot=False,
-                offset_x_pix=resolved_offset_x_pix,
-                offset_y_pix=resolved_offset_y_pix,
-            )
-        else:
-            raise ValueError(
-                f"Unsupported GUIDE_STAR_QUERY_BACKEND={query_backend!r}. "
-                "Use 'et_focalplane' or 'legacy_box_gaia'."
-            )
+#     while True:
+#         if backend == "et_focalplane":
+#             star_data = mk_real_field_stars_et_focalplane(
+#                 target_ra=ra,
+#                 target_dec=dec,
+#                 catalog_dir=catalog_dir or GUIDE_GAIA_CATALOG_DIR,
+#                 registry_data_dir=et_focalplane_data_dir or ET_FOCALPLANE_DATA_DIR,
+#                 px_cnt=px_cnt,
+#                 apply_offset=apply_offset,
+#                 mag_lim=gaia_gmag_lim,
+#                 plot=False,
+#                 offset_x_pix=resolved_offset_x_pix,
+#                 offset_y_pix=resolved_offset_y_pix,
+#                 target_epoch=target_epoch,
+#                 crop_to_simulation_frame=crop_to_simulation_frame,
+#                 crop_margin_pix=crop_margin_pix,
+#                 et_focalplane_src=et_focalplane_src_dir or ET_FOCALPLANE_SRC_DIR,
+#             )
+#         elif backend == "legacy_box_gaia":
+#             star_data = mk_real_field_stars_2(
+#                 ra=ra,
+#                 dec=dec,
+#                 px_cnt=px_cnt,
+#                 px_scale=px_scale,
+#                 apply_offset=apply_offset,
+#                 mag_lim=gaia_gmag_lim,
+#                 plot=False,
+#                 offset_x_pix=resolved_offset_x_pix,
+#                 offset_y_pix=resolved_offset_y_pix,
+#             )
+#         else:
+#             raise ValueError(
+#                 f"Unsupported GUIDE_STAR_QUERY_BACKEND={query_backend!r}. "
+#                 "Use 'et_focalplane' or 'legacy_box_gaia'."
+#             )
 
-        n_found = int(len(np.asarray(star_data["x0"])))
-        tried_limits.append(
-            {
-                "gaia_gmag_lim": float(gaia_gmag_lim),
-                "n_stars_found": n_found,
-            }
-        )
+#         n_found = int(len(np.asarray(star_data["x0"])))
+#         tried_limits.append(
+#             {
+#                 "gaia_gmag_lim": float(gaia_gmag_lim),
+#                 "n_stars_found": n_found,
+#             }
+#         )
 
-        if n_found >= int(min_catalog_stars) or gaia_gmag_lim >= float(
-            gaia_gmag_lim_max
-        ):
-            break
+#         if n_found >= int(min_catalog_stars) or gaia_gmag_lim >= float(
+#             gaia_gmag_lim_max
+#         ):
+#             break
 
-        gaia_gmag_lim = min(
-            float(gaia_gmag_lim_max),
-            float(gaia_gmag_lim + gaia_gmag_step),
-        )
+#         gaia_gmag_lim = min(
+#             float(gaia_gmag_lim_max),
+#             float(gaia_gmag_lim + gaia_gmag_step),
+#         )
 
-    if plot:
-        if backend == "et_focalplane":
-            star_data = mk_real_field_stars_et_focalplane(
-                target_ra=ra,
-                target_dec=dec,
-                catalog_dir=catalog_dir or GUIDE_GAIA_CATALOG_DIR,
-                registry_data_dir=et_focalplane_data_dir or ET_FOCALPLANE_DATA_DIR,
-                px_cnt=px_cnt,
-                apply_offset=apply_offset,
-                mag_lim=gaia_gmag_lim,
-                plot=True,
-                offset_x_pix=resolved_offset_x_pix,
-                offset_y_pix=resolved_offset_y_pix,
-                target_epoch=target_epoch,
-                crop_to_simulation_frame=crop_to_simulation_frame,
-                crop_margin_pix=crop_margin_pix,
-                et_focalplane_src=et_focalplane_src_dir or ET_FOCALPLANE_SRC_DIR,
-            )
-        else:
-            star_data = mk_real_field_stars_2(
-                ra=ra,
-                dec=dec,
-                px_cnt=px_cnt,
-                px_scale=px_scale,
-                apply_offset=apply_offset,
-                mag_lim=gaia_gmag_lim,
-                plot=True,
-                offset_x_pix=resolved_offset_x_pix,
-                offset_y_pix=resolved_offset_y_pix,
-            )
+#     if plot:
+#         if backend == "et_focalplane":
+#             star_data = mk_real_field_stars_et_focalplane(
+#                 target_ra=ra,
+#                 target_dec=dec,
+#                 catalog_dir=catalog_dir or GUIDE_GAIA_CATALOG_DIR,
+#                 registry_data_dir=et_focalplane_data_dir or ET_FOCALPLANE_DATA_DIR,
+#                 px_cnt=px_cnt,
+#                 apply_offset=apply_offset,
+#                 mag_lim=gaia_gmag_lim,
+#                 plot=True,
+#                 offset_x_pix=resolved_offset_x_pix,
+#                 offset_y_pix=resolved_offset_y_pix,
+#                 target_epoch=target_epoch,
+#                 crop_to_simulation_frame=crop_to_simulation_frame,
+#                 crop_margin_pix=crop_margin_pix,
+#                 et_focalplane_src=et_focalplane_src_dir or ET_FOCALPLANE_SRC_DIR,
+#             )
+#         else:
+#             star_data = mk_real_field_stars_2(
+#                 ra=ra,
+#                 dec=dec,
+#                 px_cnt=px_cnt,
+#                 px_scale=px_scale,
+#                 apply_offset=apply_offset,
+#                 mag_lim=gaia_gmag_lim,
+#                 plot=True,
+#                 offset_x_pix=resolved_offset_x_pix,
+#                 offset_y_pix=resolved_offset_y_pix,
+#             )
 
-    return star_data, {
-        "query_backend": backend,
-        "query_detector_id": str(star_data.get("detector_id", "")),
-        "query_target_epoch": float(target_epoch),
-        "query_base_gaia_gmag_lim": float(base_gaia_gmag_lim),
-        "query_final_gaia_gmag_lim": float(gaia_gmag_lim),
-        "query_gaia_gmag_step": float(gaia_gmag_step),
-        "query_gaia_gmag_lim_max": float(gaia_gmag_lim_max),
-        "query_crop_to_simulation_frame": bool(crop_to_simulation_frame),
-        "query_crop_margin_pix": float(crop_margin_pix),
-        "query_history": tried_limits,
-        "query_reached_min_star_target": bool(
-            len(np.asarray(star_data["x0"])) >= int(min_catalog_stars)
-        ),
-        "resolved_field_offset_x_pix": float(resolved_offset_x_pix),
-        "resolved_field_offset_y_pix": float(resolved_offset_y_pix),
-    }
+#     return star_data, {
+#         "query_backend": backend,
+#         "query_detector_id": str(star_data.get("detector_id", "")),
+#         "query_target_epoch": float(target_epoch),
+#         "query_base_gaia_gmag_lim": float(base_gaia_gmag_lim),
+#         "query_final_gaia_gmag_lim": float(gaia_gmag_lim),
+#         "query_gaia_gmag_step": float(gaia_gmag_step),
+#         "query_gaia_gmag_lim_max": float(gaia_gmag_lim_max),
+#         "query_crop_to_simulation_frame": bool(crop_to_simulation_frame),
+#         "query_crop_margin_pix": float(crop_margin_pix),
+#         "query_history": tried_limits,
+#         "query_reached_min_star_target": bool(
+#             len(np.asarray(star_data["x0"])) >= int(min_catalog_stars)
+#         ),
+#         "resolved_field_offset_x_pix": float(resolved_offset_x_pix),
+#         "resolved_field_offset_y_pix": float(resolved_offset_y_pix),
+#     }
 
 
 def build_variant_settings(**overrides):
@@ -656,7 +903,9 @@ def build_variant_settings(**overrides):
         enable_scattered_light=True,
         enable_dark_current=True,
         enable_readout_noise=True,
-        enable_gain=False,
+        enable_gain=True,
+        enable_whole_pixel_gain_normal_distribution=False,
+        enable_whole_pixel_gain_sinusoidal_modulation=False,
         enable_target_star=True,
         enable_background_stars=True,
         enable_jitter=False,
@@ -705,6 +954,19 @@ EFFECT_PROFILES = {
         include_momentum_dump=False,
         uses_jitter_integrated_psf=True,
     ),
+    # "v2a_jitter": dict(
+    #     name="v2a_jitter",
+    #     description="v2a_jitter",
+    #     variant_settings=build_variant_settings(
+    #         enable_jitter=True,
+    #         enable_pointing_drift=False,
+    #     ),
+    #     include_pointing_drift=False,
+    #     include_dva=False,
+    #     include_thermal=False,
+    #     include_momentum_dump=False,
+    #     uses_jitter_integrated_psf=True,
+    # ),
     "v3_dva": dict(
         name="v3_dva",
         description="v3_dva",
@@ -743,17 +1005,42 @@ EFFECT_PROFILES = {
         include_momentum_dump=False,
         uses_jitter_integrated_psf=False,
     ),
+    # 自定义：关闭暗电流、背景光、杂散光、读出噪声
+    "v0_onlypsf": dict(
+        name="v0_onlypsf",  
+        description="v0_onlypsf", #no_dark_bg_scatter_readout
+        variant_settings=build_variant_settings(
+            enable_stellar_photon_noise=True,
+            enable_background_light=False,
+            enable_scattered_light=False,
+            enable_dark_current=False,
+            enable_readout_noise=False,
+            enable_gain=False,
+            enable_target_star=True,
+            enable_background_stars=True,
+        ),
+        include_pointing_drift=False,
+        include_dva=False,
+        include_thermal=False,
+        include_momentum_dump=False,
+        uses_jitter_integrated_psf=False,
+    ),
 }
 
 
 EFFECT_PROFILE_ALIASES = {
     "full": "full",
+    "version0": "v0_onlypsf",
+    "v0": "v0_onlypsf",
+    "v0_onlypsf": "v0_onlypsf",
     "version1": "v1_noise_psf",
     "v1": "v1_noise_psf",
     "v1_noise_psf": "v1_noise_psf",
     "version2": "v2_point_drift_jitter",
     "v2": "v2_point_drift_jitter",
     "v2_point_drift_jitter": "v2_point_drift_jitter",
+    # "v2a": "v2a_jitter",
+    # "v2a_jitter": "v2a_jitter",
     "version3": "v3_dva",
     "v3": "v3_dva",
     "v3_dva": "v3_dva",
@@ -766,7 +1053,7 @@ EFFECT_PROFILE_ALIASES = {
 }
 
 
-requested_effect_profile = env_str("ET_EFFECT_PROFILE", "v1_noise_psf").lower()
+requested_effect_profile = env_str("ET_EFFECT_PROFILE", "v2_point_drift_jitter").lower()
 effect_profile_key = EFFECT_PROFILE_ALIASES.get(
     requested_effect_profile, requested_effect_profile
 )
@@ -779,21 +1066,75 @@ if effect_profile_key not in EFFECT_PROFILES:
 
 ACTIVE_EFFECT_PROFILE = EFFECT_PROFILES[effect_profile_key]
 PROFILE_TARGET_FRAMES = env_int("ET_PROFILE_TARGET_FRAMES", None)
+ENABLE_FRAME_TO_FRAME_DRIFT = env_flag(
+    "ET_ENABLE_FRAME_TO_FRAME_DRIFT",
+    False,
+)
+_ENABLE_FRAME_TO_FRAME_DRIFT_ENV = os.environ.get("ET_ENABLE_FRAME_TO_FRAME_DRIFT")
 
-RUN_ALL_BATCHES = env_flag("ET_RUN_ALL_BATCHES", RUN_ALL_BATCHES)
+RUNTIME_EFFECT_COMPONENTS = {
+    "pointing_drift": bool(ENABLE_FRAME_TO_FRAME_DRIFT),
+    "jitter": bool(ACTIVE_EFFECT_PROFILE["variant_settings"].get("enable_jitter", True)),
+    "dva": bool(ACTIVE_EFFECT_PROFILE["include_dva"]),
+    "thermal": bool(ACTIVE_EFFECT_PROFILE["include_thermal"]),
+    "momentum_dump": bool(ACTIVE_EFFECT_PROFILE["include_momentum_dump"]),
+    "psf_breathing": bool(
+        ACTIVE_EFFECT_PROFILE["variant_settings"].get("enable_psf_breathing", True)
+    ),
+    "inter_pixel_response": bool(
+        ACTIVE_EFFECT_PROFILE["variant_settings"].get(
+            "enable_inter_pixel_response", True
+        )
+    ),
+    "intra_pixel_response": bool(
+        ACTIVE_EFFECT_PROFILE["variant_settings"].get(
+            "enable_intra_pixel_response", True
+        )
+    ),
+    "pixel_phase_response": bool(
+        ACTIVE_EFFECT_PROFILE["variant_settings"].get(
+            "enable_pixel_phase_response", True
+        )
+    ),
+}
+
 OUTPUT_ROOT = env_str("ET_OUTPUT_ROOT_OVERRIDE", OUTPUT_ROOT)
 OUTPUT_RUN_NAME = env_str("ET_OUTPUT_RUN_NAME_OVERRIDE", OUTPUT_RUN_NAME)
 MAX_SIM_STARS = env_int("ET_MAX_SIM_STARS", MAX_SIM_STARS)
+GAIA_GMAG_LIM_MIN = env_float_or_none(
+    "ET_GAIA_GMAG_LIM_MIN", GAIA_GMAG_LIM_MIN
+)
+ENABLE_PERIODIC_RADIAL_EXPANSION = env_flag(
+    "ET_ENABLE_PERIODIC_RADIAL_EXPANSION", ENABLE_PERIODIC_RADIAL_EXPANSION
+)
+RADIAL_EXPANSION_PERIOD_S = float(
+    env_float_or_none("ET_RADIAL_EXPANSION_PERIOD_S", RADIAL_EXPANSION_PERIOD_S)
+)
+RADIAL_EXPANSION_ACTIVE_LAST_S = float(
+    env_float_or_none(
+        "ET_RADIAL_EXPANSION_ACTIVE_LAST_S", RADIAL_EXPANSION_ACTIVE_LAST_S
+    )
+)
+RADIAL_EXPANSION_ARCSEC = float(
+    env_float_or_none("ET_RADIAL_EXPANSION_ARCSEC", RADIAL_EXPANSION_ARCSEC)
+)
 
 print(
     "[Effect profile] "
     f"{ACTIVE_EFFECT_PROFILE['name']}  "
-    f"(pointing={ACTIVE_EFFECT_PROFILE['include_pointing_drift']}, "
-    f"jitter={ACTIVE_EFFECT_PROFILE['variant_settings'].get('enable_jitter', True)}, "
-    f"dva={ACTIVE_EFFECT_PROFILE['include_dva']}, "
-    f"thermal={ACTIVE_EFFECT_PROFILE['include_thermal']}, "
-    f"prv={ACTIVE_EFFECT_PROFILE['variant_settings'].get('enable_inter_pixel_response', True) or ACTIVE_EFFECT_PROFILE['variant_settings'].get('enable_intra_pixel_response', True) or ACTIVE_EFFECT_PROFILE['variant_settings'].get('enable_pixel_phase_response', True)})"
+    f"(pointing={RUNTIME_EFFECT_COMPONENTS['pointing_drift']}, "
+    f"jitter={RUNTIME_EFFECT_COMPONENTS['jitter']}, "
+    f"dva={RUNTIME_EFFECT_COMPONENTS['dva']}, "
+    f"thermal={RUNTIME_EFFECT_COMPONENTS['thermal']}, "
+    f"prv={RUNTIME_EFFECT_COMPONENTS['inter_pixel_response'] or RUNTIME_EFFECT_COMPONENTS['intra_pixel_response'] or RUNTIME_EFFECT_COMPONENTS['pixel_phase_response']})"
 )
+if _ENABLE_FRAME_TO_FRAME_DRIFT_ENV is None:
+    print("[Runtime default] ET_ENABLE_FRAME_TO_FRAME_DRIFT=False for final_4 jitter-only runs.")
+else:
+    print(
+        "[Runtime override] "
+        f"ET_ENABLE_FRAME_TO_FRAME_DRIFT={ENABLE_FRAME_TO_FRAME_DRIFT}"
+    )
 
 
 def get_output_dirs():
@@ -827,66 +1168,6 @@ def pick_compute_device(requested: str) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def build_runtime_config_xlsx(source_path: str, batch_dir: str) -> str:
-    """Create a per-run config copy with hidden telescope FOV offset disabled.
-
-    We intentionally keep the source Excel untouched. Older config sheets may still
-    carry `Telescope FOV Max Offset > 0`, but the simulator no longer permits that
-    hidden random offset. For runtime safety and reproducibility, sanitize it here.
-    """
-
-    source = Path(source_path).expanduser().resolve()
-    runtime_path = (
-        Path(batch_dir) / f"{source.stem}.runtime_no_fov_offset{source.suffix}"
-    )
-
-    wb = load_workbook(source)
-    replacements = {
-        "Telescope FOV Max Offset": (
-            0,
-            "Must remain 0. Hidden telescope-wide random FOV offset is disabled for "
-            "ET guide simulations; use explicit field offsets only when intentionally configured.",
-        ),
-        "Target Max Offset": (
-            0,
-            "Must remain 0 for ET guide simulations unless a target-star-only offset is "
-            "explicitly required by the experiment design.",
-        ),
-    }
-    patched = set()
-    for ws in wb.worksheets:
-        for row in ws.iter_rows():
-            if len(row) < 5:
-                continue
-            key = row[1].value
-            if key not in replacements:
-                continue
-            replacement_value, replacement_desc = replacements[key]
-            current = row[2].value
-            if current not in (
-                replacement_value,
-                float(replacement_value),
-                str(replacement_value),
-                None,
-            ):
-                print(
-                    "[Config sanitize] "
-                    f"{source.name}: {key} {current} -> {replacement_value}"
-                )
-            row[2].value = replacement_value
-            row[4].value = replacement_desc
-            patched.add(str(key))
-
-    missing = [key for key in replacements if key not in patched]
-    if missing:
-        raise ValueError(
-            "未在输入配置表中找到以下参数，无法构造运行时配置副本：" f" {missing}"
-        )
-
-    wb.save(runtime_path)
-    return str(runtime_path)
-
-
 # ---- global init: deterministic RNG + output dirs ----
 set_global_seed(GLOBAL_SEED)
 RUN_DIR, BATCH_DIR, FRAMES_DIR, CACHE_DIR = get_output_dirs()
@@ -918,6 +1199,74 @@ def load_pickle(pklf):
     return dd
 
 
+def prepare_photsim7_config_xlsx(config_xlsx_path: str, cache_dir: str):
+    """Create a temporary config sheet accepted by Photsim7's unit validation."""
+
+    import pandas as pd
+
+    source_path = Path(config_xlsx_path)
+    config_df = pd.read_excel(source_path)
+    if len(config_df.columns) < 2:
+        raise ValueError(f"配置文件列数不足，无法定位参数名列: {source_path}")
+
+    parameter_col = config_df.columns[1]
+    if "Value" not in config_df.columns or "Unit" not in config_df.columns:
+        raise ValueError(
+            f"配置文件缺少 Value/Unit 列，无法为 Photsim7 修正 Readout Noise 单位: {source_path}"
+        )
+
+    readout_mask = config_df[parameter_col].astype(str).str.strip().eq("Readout Noise")
+    if not readout_mask.any():
+        raise ValueError(f"配置文件中没有 Readout Noise 行: {source_path}")
+
+    config_df.loc[readout_mask, "Value"] = float(GUIDE_READOUT_NOISE_E_PER_PIX)
+    config_df.loc[readout_mask, "Unit"] = "electron/pix"
+
+    psf_field_id_mask = config_df[parameter_col].astype(str).str.strip().eq("PSF Field ID")
+    if psf_field_id_mask.any():
+        config_df.loc[psf_field_id_mask, "Value"] = str(int(GUIDE_PSF_FIELD_ID))
+        config_df.loc[psf_field_id_mask, "Unit"] = None
+
+    # Keep simulator policy explicit: hidden random global offsets must stay disabled.
+    forced_zero_items = {}
+    for offset_name in ("Telescope FOV Max Offset", "Target Max Offset"):
+        offset_mask = (
+            config_df[parameter_col].astype(str).str.strip().eq(offset_name)
+        )
+        if not offset_mask.any():
+            forced_zero_items[offset_name] = {
+                "present": False,
+                "forced_zero": False,
+                "original_values": [],
+            }
+            print(f"[Config sanitize] {offset_name} not found in {source_path}")
+            continue
+
+        original_values = []
+        for value in config_df.loc[offset_mask, "Value"].tolist():
+            if pd.isna(value):
+                original_values.append(None)
+            else:
+                original_values.append(str(value))
+
+        config_df.loc[offset_mask, "Value"] = 0
+        forced_zero_items[offset_name] = {
+            "present": True,
+            "forced_zero": True,
+            "original_values": original_values,
+        }
+        if any(v not in (None, "0", "0.0") for v in original_values):
+            print(
+                f"[Config sanitize] {offset_name} {original_values} -> 0"
+            )
+
+    output_dir = Path(cache_dir) / "photsim7_config"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{source_path.stem}_photsim7_units.xlsx"
+    config_df.to_excel(output_path, index=False)
+    return str(output_path), forced_zero_items
+
+
 plt.close("all")
 # %matplotlib inline
 
@@ -933,16 +1282,92 @@ Working with this configuration:
 """
 
 # config_xlsx_full_path = 'et_inputs_D2_PSF(241006)_Ji(0.24as)_Dr(0.03as_TESS_to_ET)_MD(limit_0.15as_Cyc_3d)_B(TESS_to_ET).xlsx'
-config_xlsx_full_path = os.environ.get(
-    "ET_CONFIG_XLSX",
-    str(Path(__file__).resolve().parent.parent / "config" / "et_100_det_inputs_1h.xlsx"),
-)
-runtime_config_xlsx_full_path = build_runtime_config_xlsx(
-    source_path=config_xlsx_full_path,
-    batch_dir=BATCH_DIR,
+config_xlsx_candidates = []
+
+config_xlsx_override = os.environ.get("ET_CONFIG_XLSX_PATH")
+if config_xlsx_override:
+    config_xlsx_candidates.append(config_xlsx_override)
+
+config_xlsx_candidates.extend(
+    [
+        "/home/liyang/ET7/ET-fsgsim/config/et_inputs_transit_guider.xlsx",
+    ]
 )
 
-config_manager = ConfigurationManager(filepath=runtime_config_xlsx_full_path)
+config_xlsx_full_path = None
+for candidate in config_xlsx_candidates:
+    if candidate and os.path.isfile(candidate):
+        config_xlsx_full_path = candidate
+        break
+
+if config_xlsx_full_path is None:
+    searched = ", ".join(config_xlsx_candidates)
+    raise FileNotFoundError(
+        f"No transit guider xlsx found. Checked: {searched}"
+    )
+
+config_manager_xlsx_path, config_forced_zero_items = prepare_photsim7_config_xlsx(
+    config_xlsx_full_path,
+    CACHE_DIR,
+)
+print(f"[Config] Photsim7-compatible config sheet={config_manager_xlsx_path}")
+
+config_manager = ConfigurationManager(filepath=config_manager_xlsx_path)
+_psf_bundle_source = "xlsx"
+
+if PSF_BUNDLE_NAME_DEFAULT and PSF_BUNDLE_NAME_DEFAULT.strip():
+    config_manager.parameters["PSF Bundle Name"] = PSF_BUNDLE_NAME_DEFAULT.strip()
+    _psf_bundle_source = "default"
+    print(
+        f"[Config default] PSF Bundle Name={config_manager.parameters['PSF Bundle Name']}"
+    )
+
+_psf_bundle_name_env = os.environ.get("ET_PSF_BUNDLE_NAME_OVERRIDE")
+if _psf_bundle_name_env is None:
+    # Backward-compatible alias for older launch scripts.
+    _psf_bundle_name_env = os.environ.get("PSF_BUNDLE_NAME_OVERRIDE")
+
+if _psf_bundle_name_env is not None and _psf_bundle_name_env.strip():
+    config_manager.parameters["PSF Bundle Name"] = _psf_bundle_name_env.strip()
+    _psf_bundle_source = "env_override"
+    print(
+        f"[Config override] PSF Bundle Name={config_manager.parameters['PSF Bundle Name']}"
+    )
+else:
+    print(f"[Config] PSF Bundle Name={config_manager.parameters['PSF Bundle Name']}")
+
+_psf_bundle_name = str(config_manager.parameters["PSF Bundle Name"])
+_psf_bundle_sim_psf_images_path = (
+    Path(BASE_DATA_DIR) / "psf" / "et" / _psf_bundle_name / "sim_psf_images.pkl"
+)
+
+_optical_eff_override = env_float_or_none("ET_GUIDE_OPTICAL_EFFICIENCY", None)
+_et_qe_override = env_float_or_none(
+    "ET_GUIDE_QUANTUM_EFFICIENCY",
+    GUIDE_ET_QUANTUM_EFFICIENCY_DEFAULT,
+)
+_optical_eff_missing_from_input = any(
+    "Optical Efficiency Ratio" in item for item in config_manager.missing_log
+)
+if _optical_eff_override is not None:
+    config_manager.parameters["Optical Efficiency Ratio"] = efficiency_to_percent_quantity(
+        _optical_eff_override,
+        "ET_GUIDE_OPTICAL_EFFICIENCY",
+    )
+elif _optical_eff_missing_from_input:
+    config_manager.parameters["Optical Efficiency Ratio"] = efficiency_to_percent_quantity(
+        GUIDE_OPTICAL_EFFICIENCY_RATIO_DEFAULT,
+        "GUIDE_OPTICAL_EFFICIENCY_RATIO_DEFAULT",
+    )
+config_manager.parameters["ET Quantum Efficiency"] = efficiency_to_percent_quantity(
+    _et_qe_override,
+    "ET_GUIDE_QUANTUM_EFFICIENCY",
+)
+print(
+    "[Config] ET throughput/QE "
+    f"throughput={config_manager.parameters['Optical Efficiency Ratio']} "
+    f"qe={config_manager.parameters['ET Quantum Efficiency']}"
+)
 
 # ---------------------------------------------------------------------------
 # 导星探测器参数覆盖：以主探测器 xlsx 为基础，仅在脚本层改写差异项。
@@ -955,12 +1380,13 @@ config_manager.parameters["Pixel Width"] = GUIDE_PIXEL_WIDTH_UM * u.um
 config_manager.parameters["Exposure Duration"] = GUIDE_EXPOSURE_S * u.s
 config_manager.parameters["Readout Duration"] = GUIDE_READOUT_S * u.s
 config_manager.parameters["Observing Duration"] = GUIDE_OBSERVING_DURATION_S * u.s
-config_manager.parameters["Readout Noise"] = GUIDE_READOUT_NOISE_ADU_PER_PIX * (
-    u.adu / u.pix
+config_manager.parameters["PSF Field ID"] = int(GUIDE_PSF_FIELD_ID)
+config_manager.parameters["Readout Noise"] = GUIDE_READOUT_NOISE_E_PER_PIX * (
+    u.electron / u.pix
 )
-config_manager.parameters["Background Flux"] = GUIDE_BACKGROUND_FLUX_E_PER_S_PER_PIX * (
-    u.electron / u.s / u.pix
-)
+# config_manager.parameters["Background Flux"] = GUIDE_BACKGROUND_FLUX_E_PER_S_PER_PIX * (
+#     u.electron / u.s / u.pix
+# )
 config_manager.parameters["Scattered Light"] = (
     GUIDE_SCATTERED_LIGHT_E_PER_S_PER_PIX * u.electron / u.s / u.pix
 )
@@ -968,6 +1394,20 @@ config_manager.parameters["Dark Current"] = GUIDE_DARK_CURRENT_E_PER_S_PER_PIX *
     u.electron / u.s / u.pix
 )
 config_manager.parameters["Inter-PRV (RMS)"] = GUIDE_INTER_PRV_RMS_PERCENT * u.percent
+config_manager.parameters["Enable ADC Digitization"] = True
+config_manager.parameters["Full Well Electrons"] = GUIDE_FULL_WELL_ELECTRONS * u.electron
+config_manager.parameters["Gain Electrons Per ADU"] = (
+    GUIDE_GAIN_ELECTRONS_PER_ADU * u.electron / u.adu
+)
+config_manager.parameters["ADC Bit Depth"] = GUIDE_ADC_BIT_DEPTH
+config_manager.parameters["ADC Min Value"] = 0.0
+config_manager.parameters["ADC Round Values"] = True
+config_manager.parameters["Bias Level ADU"] = GUIDE_BIAS_LEVEL_ADU * u.adu
+config_manager.parameters["Column Noise Sigma ADU"] = GUIDE_COLUMN_NOISE_SIGMA_ADU * u.adu
+config_manager.parameters["Enable Cosmic Rays"] = GUIDE_ENABLE_COSMIC_RAYS
+config_manager.parameters["Enable Whole Pixel Gain Normal Distribution"] = False
+config_manager.parameters["Enable Whole Pixel Gain Sinusoidal Modulation"] = False
+config_manager.parameters["Subtract Nonstellar Mean"] = GUIDE_SUBTRACT_NONSTELLAR_MEAN
 
 FRAME_TIMING = resolve_detector_frame_timing(config_manager.parameters)
 RAW_FRAME_INTEGRATION_S = float(FRAME_TIMING["raw_frame_integration_s"])
@@ -981,6 +1421,30 @@ if PROFILE_TARGET_FRAMES is not None and PROFILE_TARGET_FRAMES > 0:
 
 if not ACTIVE_EFFECT_PROFILE["uses_jitter_integrated_psf"]:
     config_manager.parameters["Use Jitter-Integrated PSF"] = False
+
+_n_jit_models_override = env_int("ET_N_JITTER_INTEGRATED_PSF_MODELS", None)
+if _n_jit_models_override is not None:
+    if _n_jit_models_override <= 0:
+        raise ValueError("ET_N_JITTER_INTEGRATED_PSF_MODELS must be positive.")
+    config_manager.parameters["N Jitter-Integrated PSF Models"] = int(
+        _n_jit_models_override
+    )
+    print(
+        "[Config override] N Jitter-Integrated PSF Models="
+        f"{config_manager.parameters['N Jitter-Integrated PSF Models']}"
+    )
+
+_n_jit_frames_override = env_int("ET_N_JITTER_FRAMES_PER_MODEL", None)
+if _n_jit_frames_override is not None:
+    if _n_jit_frames_override <= 0:
+        raise ValueError("ET_N_JITTER_FRAMES_PER_MODEL must be positive.")
+    config_manager.parameters["N Jitter Frames Per Model"] = int(
+        _n_jit_frames_override
+    )
+    print(
+        "[Config override] N Jitter Frames Per Model="
+        f"{config_manager.parameters['N Jitter Frames Per Model']}"
+    )
 
 # ---------------------------------------------------------------------------
 # 关键自检：确认 xlsx 的 observing duration / cadence / 帧数
@@ -1004,10 +1468,10 @@ print(
 )
 
 # ============================================================================
-# 单帧尺寸修改：用导星探测器视场自动换算像素边长，并覆盖配置里的 Detector Width。
+# 单帧尺寸修改：用导星探测器视场自动换算像素边长，并覆盖配置里的 Detector Width/Height。
 # ============================================================================
-# photsim6 的 detector/PSF/image 目前主要使用一个 n_pixels（正方形）来定义单帧尺寸。
-# 因此我们只需要覆盖 "Detector Width" 即可让后续：
+# 导星仿真按正方形视场运行；Photsim7 会同时读取 Detector Width 和 Detector Height。
+# 因此两个方向都需要覆盖，避免旧 xlsx 里的 101 pix height 泄漏到输出数组。
 # - mk_real_field_stars_2 查询范围（px_cnt）
 # - Detector 构造
 # - PSF warp
@@ -1025,10 +1489,11 @@ if (n_pixels_fov % 2) == 0:
 
 print(
     f"[Frame size] Using FOV={FOV_DEG:.2f} deg and pixel_scale={pixel_scale.value:.4f} arcsec/pix -> "
-    f"Detector Width = {n_pixels_fov} pix (forced odd)."
+    f"Detector Width/Height = {n_pixels_fov} pix (forced odd)."
 )
 
 config_manager.parameters["Detector Width"] = n_pixels_fov * u.pix
+config_manager.parameters["Detector Height"] = n_pixels_fov * u.pix
 
 # 补充写入本批次 metadata（可用于你后续做“同一套 motion、不同天区中心”的对照检查）
 try:
@@ -1037,47 +1502,46 @@ try:
 except Exception:
     _meta = {}
 
+_readout_noise_e_per_pix = float(
+    config_manager.parameters["Readout Noise"].to(u.electron / u.pix).value
+)
+_gain_electrons_per_adu = float(
+    config_manager.parameters["Gain Electrons Per ADU"].to(u.electron / u.adu).value
+)
+_readout_noise_adu_per_pix = _readout_noise_e_per_pix / _gain_electrons_per_adu
+_enable_adc_digitization = bool(config_manager.parameters["Enable ADC Digitization"])
+
 _meta.update(
     {
+        "photsim_core": "photsim7",
+        "photsim7_root": str(PHOTSIM7_ROOT),
+        "photsim7_data_dir": str(PHOTSIM7_DATA_DIR),
         "instrument": "guide_detector",
         "config_xlsx_full_path": config_xlsx_full_path,
+        "config_manager_xlsx_path": config_manager_xlsx_path,
+        "config_forced_zero_items": config_forced_zero_items,
         "effect_profile": ACTIVE_EFFECT_PROFILE["name"],
         "effect_profile_requested": requested_effect_profile,
         "effect_profile_target_frames": (
             None if PROFILE_TARGET_FRAMES is None else int(PROFILE_TARGET_FRAMES)
         ),
+        "optical_efficiency_ratio_percent": float(
+            config_manager.parameters["Optical Efficiency Ratio"].to(u.percent).value
+        ),
+        "et_quantum_efficiency_percent": float(
+            config_manager.parameters["ET Quantum Efficiency"].to(u.percent).value
+        ),
         "effect_profile_variant_settings": dict(
             ACTIVE_EFFECT_PROFILE["variant_settings"]
         ),
-        "effect_profile_components": {
-            "pointing_drift": bool(ACTIVE_EFFECT_PROFILE["include_pointing_drift"]),
-            "jitter": bool(
-                ACTIVE_EFFECT_PROFILE["variant_settings"].get("enable_jitter", True)
-            ),
-            "dva": bool(ACTIVE_EFFECT_PROFILE["include_dva"]),
-            "thermal": bool(ACTIVE_EFFECT_PROFILE["include_thermal"]),
-            "momentum_dump": bool(ACTIVE_EFFECT_PROFILE["include_momentum_dump"]),
-            "psf_breathing": bool(
-                ACTIVE_EFFECT_PROFILE["variant_settings"].get(
-                    "enable_psf_breathing", True
-                )
-            ),
-            "inter_pixel_response": bool(
-                ACTIVE_EFFECT_PROFILE["variant_settings"].get(
-                    "enable_inter_pixel_response", True
-                )
-            ),
-            "intra_pixel_response": bool(
-                ACTIVE_EFFECT_PROFILE["variant_settings"].get(
-                    "enable_intra_pixel_response", True
-                )
-            ),
-            "pixel_phase_response": bool(
-                ACTIVE_EFFECT_PROFILE["variant_settings"].get(
-                    "enable_pixel_phase_response", True
-                )
-            ),
-        },
+        "effect_profile_components": dict(RUNTIME_EFFECT_COMPONENTS),
+        "enable_frame_to_frame_drift": bool(ENABLE_FRAME_TO_FRAME_DRIFT),
+        "psf_bundle_name": _psf_bundle_name,
+        "psf_bundle_source": _psf_bundle_source,
+        "psf_bundle_sim_psf_images_path": str(_psf_bundle_sim_psf_images_path),
+        "psf_bundle_sim_psf_images_exists": bool(
+            _psf_bundle_sim_psf_images_path.is_file()
+        ),
         "psf_field_angle_deg": float(GUIDE_PSF_FIELD_ANGLE_DEG),
         "psf_field_id": int(GUIDE_PSF_FIELD_ID),
         "fov_deg": float(FOV_DEG),
@@ -1094,9 +1558,9 @@ _meta.update(
         "observing_duration_s": float(
             config_manager.parameters["Observing Duration"].to(u.s).value
         ),
-        "background_surface_brightness_mag_per_arcsec2": float(
-            GUIDE_BACKGROUND_SURFACE_BRIGHTNESS_MAG_PER_ARCSEC2
-        ),
+        # "background_surface_brightness_mag_per_arcsec2": float(
+        #     GUIDE_BACKGROUND_SURFACE_BRIGHTNESS_MAG_PER_ARCSEC2
+        # ),
         "background_flux_e_per_s_per_pix": float(
             config_manager.parameters["Background Flux"]
             .to(u.electron / u.s / u.pix)
@@ -1116,13 +1580,28 @@ _meta.update(
             .to(u.electron / u.s / u.pix)
             .value
         ),
-        "readout_noise_adu_per_pix": float(
-            config_manager.parameters["Readout Noise"].to(u.adu / u.pix).value
+        "readout_noise_adu_per_pix": float(_readout_noise_adu_per_pix),
+        "readout_noise_e_per_pix": float(_readout_noise_e_per_pix),
+        "gain_adu_per_electron": float(1.0 / _gain_electrons_per_adu),
+        "gain_electrons_per_adu": float(_gain_electrons_per_adu),
+        "enable_adc_digitization": _enable_adc_digitization,
+        "full_well_electrons": float(
+            config_manager.parameters["Full Well Electrons"].to(u.electron).value
         ),
-        "readout_noise_e_per_pix": float(
-            config_manager.parameters["Readout Noise"].to(u.adu / u.pix).value
+        "adc_bit_depth": int(config_manager.parameters["ADC Bit Depth"]),
+        "adc_min_value": float(config_manager.parameters["ADC Min Value"]),
+        "adc_round_values": bool(config_manager.parameters["ADC Round Values"]),
+        "bias_level_adu": float(
+            config_manager.parameters["Bias Level ADU"].to(u.adu).value
         ),
-        "gain_adu_per_electron": 1.0,
+        "column_noise_sigma_adu": float(
+            config_manager.parameters["Column Noise Sigma ADU"].to(u.adu).value
+        ),
+        "enable_cosmic_rays": bool(config_manager.parameters["Enable Cosmic Rays"]),
+        "subtract_nonstellar_mean": bool(
+            config_manager.parameters["Subtract Nonstellar Mean"]
+        ),
+        "image_unit": "adu_dn" if _enable_adc_digitization else "electron",
         "inter_prv_rms_percent": float(
             config_manager.parameters["Inter-PRV (RMS)"].to(u.percent).value
         ),
@@ -1154,9 +1633,26 @@ _meta.update(
             "truth_abs_x_detector_pix",
             "truth_abs_y_detector_pix",
         ],
-        "frame_truth_source": "photsim7_frame_truth_builder",
+        "frame_truth_source": "photsim6ft_frame_truth_builder",
         "field_polar_angle_rad": float(FIELD_POLAR_ANGLE_RAD),
         "jitter_truth_mode": "shared_per_frame_mean",
+        "enable_periodic_radial_expansion": bool(ENABLE_PERIODIC_RADIAL_EXPANSION),
+        "radial_expansion_period_s": float(RADIAL_EXPANSION_PERIOD_S),
+        "radial_expansion_active_last_s": float(RADIAL_EXPANSION_ACTIVE_LAST_S),
+        "radial_expansion_arcsec": float(RADIAL_EXPANSION_ARCSEC),
+        "radial_expansion_unit_source": str(_RADIAL_UNIT_SOURCE),
+        "radial_expansion_unit_x": float(FIELD_CENTER_RADIAL_UNIT_X_DEG),
+        "radial_expansion_unit_y": float(FIELD_CENTER_RADIAL_UNIT_Y_DEG),
+        "radial_expansion_fov_center_ra_deg": (
+            None
+            if RADIAL_EXPANSION_FOV_CENTER_RA_DEG is None
+            else float(RADIAL_EXPANSION_FOV_CENTER_RA_DEG)
+        ),
+        "radial_expansion_fov_center_dec_deg": (
+            None
+            if RADIAL_EXPANSION_FOV_CENTER_DEC_DEG is None
+            else float(RADIAL_EXPANSION_FOV_CENTER_DEC_DEG)
+        ),
     }
 )
 
@@ -1321,17 +1817,19 @@ plt.legend()
 
 len(jit_spec_mask), jit_spec_mask.sum(), len(drift_spec_mask), drift_spec_mask.sum()
 
-tess_psd = load_pickle(opj(os.environ["ET_DATA_DIR"], "tess_data", "tess_xyz_psd.pkl"))
+TESS_PSD_PATH = env_str(
+    "ET_TESS_PSD_PATH",
+    #"/home/liyang/ET7/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz_within_1s_scaled_to_0p6arcsec.pkl",
+    "/home/liyang/ET75/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz_within_1s_scaled_to_0p36arcsec.pkl",
+    #"/home/liyang/ET7/Photsim7-data/pds/ET_psd3-2_extended_to_10Hz.pkl",
+)
+if not os.path.isfile(TESS_PSD_PATH):
+    raise FileNotFoundError(f"TESS jitter PSD not found: {TESS_PSD_PATH}")
+print(f"[Jitter PSD] {TESS_PSD_PATH}")
+TESS_PSD_CACHE_LABEL = Path(TESS_PSD_PATH).stem
+tess_psd = load_pickle(TESS_PSD_PATH)
 
-"""
-
-
-IS SET BELOW TO MAKE 2X TESS JITTER !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-"""
-
-tess_jitter_mult = 2  # Multiply the amplitude of TESS jitter
+tess_jitter_mult = 1  # Use the jitter amplitude encoded by TESS_PSD_PATH directly.
 
 # ============================================================================
 # JI-PSF jitter 序列生成（只用于“曝光内模糊”）：只取 > split_hz 的高频部分
@@ -1351,7 +1849,7 @@ def _angles_to_xy_pix(
 ):
     """把姿态角(arcsec)转换为焦平面上的 x/y 像素位移。
 
-    这里复用 Photosim7 中 photsim6 兼容 API 的思路：
+    这里复用 photsim6ft 的思路：
     - 用一个代表全幅焦平面坐标系的位置 (x_pix, y_pix) 来施加旋转
     - displacement = old - new
 
@@ -1564,7 +2062,7 @@ jitter_frq_str = str(comps["Jitter: All"]["freqs"]).replace(" ", "")
 # 文件名里显式写入 split_hz，避免你切换 cadence 后误读旧缓存。
 jit_fn = (
     f"xy_{tess_jitter_mult}X_jitter_pix_N({n_jit_psf})_"
-    f"AFJ(Rescaled_TESS_PSD)_{DETECTOR_TYPE}_"
+    f"AFJ({TESS_PSD_CACHE_LABEL})_{DETECTOR_TYPE}_"
     f"exp{raw_frame_integration_s:.6f}s_"
     f"nsub{n_jitter_frames_per_model}_"
     f"split{split_hz:.6f}Hz.npy"
@@ -1793,7 +2291,7 @@ if ACTIVE_EFFECT_PROFILE["include_dva"]:
 # ---------------------------------
 # Thermal drift due to thermal defocus
 """
-Based on TESS lens temperatures and comverted to ET motion using a
+Based on TESS lens temperatures and comverted to ET motion using a 
 ET lens temp to centorid motion model provided by ET engineers.
 """
 
@@ -1812,7 +2310,7 @@ if ACTIVE_EFFECT_PROFILE["include_thermal"]:
 # Other drifts (from power spectrum)
 """
 This eventually needs to be better implemented. Currently, it uses a custom model
-which is defined in the function below (uses global variables! Ah!).
+which is defined in the function below (uses global variables! Ah!). 
 """
 
 
@@ -1856,10 +2354,24 @@ def generate_fft_hf_drift(time):
     # 3) 合并得到总 drift（不包含 DVA/thermal/MD 等，它们在其他 motion 组件里单独加）
     x_drift_pix = x_drift_et_pix + x_drift_tess_roll_pix
     y_drift_pix = y_drift_et_pix + y_drift_tess_roll_pix
+
+    if ENABLE_PERIODIC_RADIAL_EXPANSION:
+        x_periodic_pix, y_periodic_pix = build_periodic_radial_expansion_pix(
+            time_s=ztime_s,
+            pixel_scale_arcsec_per_pix=pixel_scale.value,
+            period_s=RADIAL_EXPANSION_PERIOD_S,
+            active_last_s=RADIAL_EXPANSION_ACTIVE_LAST_S,
+            radial_arcsec=RADIAL_EXPANSION_ARCSEC,
+            radial_unit_x=FIELD_CENTER_RADIAL_UNIT_X_DEG,
+            radial_unit_y=FIELD_CENTER_RADIAL_UNIT_Y_DEG,
+        )
+        x_drift_pix = x_drift_pix + x_periodic_pix
+        y_drift_pix = y_drift_pix + y_periodic_pix
+
     return x_drift_pix, y_drift_pix
 
 
-if ACTIVE_EFFECT_PROFILE["include_pointing_drift"]:
+if ENABLE_FRAME_TO_FRAME_DRIFT:
     dynamic_param_config["motion"] += [
         dict(
             component_name="fft_hf_drift",
@@ -1869,13 +2381,15 @@ if ACTIVE_EFFECT_PROFILE["include_pointing_drift"]:
             ),
         ),
     ]
+else:
+    print("[Motion] Skip frame-to-frame drift registration; jitter-only centroid input.")
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------------
 # PSF breathing
 """
 This eventually needs to be better implemented. Currently, it uses a custom model
-which is defined in the function imported below. This function is similar to the
+which is defined in the function imported below. This function is similar to the 
 thermal_drift DP in that it uses TESS lens temperatures and an ET temp to PSF breathing
 model (from engineers) to generate PSF breathing in the simulation.
 """
@@ -1942,7 +2456,7 @@ simulator = Simulator(
     xy_jitter_pix=xy_jitter_pix,
     compute_device=COMPUTE_DEVICE,
     float_precision=32,
-    mag_range=[7, 17],
+    mag_range=[7, 17], # [7,17] #***
     # store_images=True,
     start_ray=False,
     transit_data=transit_data,
@@ -1998,6 +2512,20 @@ _meta.update(
         "motion_split_reference": "raw_frame_integration_s",
         "n_jitter_frames_per_model": int(n_jitter_frames_per_model),
         "use_jitter_integrated_psf": bool(use_jitter_integrated_psf),
+        "tess_psd_path": str(TESS_PSD_PATH),
+        "tess_psd_cache_label": str(TESS_PSD_CACHE_LABEL),
+        "enable_frame_to_frame_drift": bool(ENABLE_FRAME_TO_FRAME_DRIFT),
+        "registered_motion_components": [
+            str(component.get("component_name", ""))
+            for component in dynamic_param_config["motion"]
+        ],
+        "enable_periodic_radial_expansion": bool(ENABLE_PERIODIC_RADIAL_EXPANSION),
+        "radial_expansion_period_s": float(RADIAL_EXPANSION_PERIOD_S),
+        "radial_expansion_active_last_s": float(RADIAL_EXPANSION_ACTIVE_LAST_S),
+        "radial_expansion_arcsec": float(RADIAL_EXPANSION_ARCSEC),
+        "radial_expansion_unit_source": str(_RADIAL_UNIT_SOURCE),
+        "radial_expansion_unit_x": float(FIELD_CENTER_RADIAL_UNIT_X_DEG),
+        "radial_expansion_unit_y": float(FIELD_CENTER_RADIAL_UNIT_Y_DEG),
     }
 )
 
@@ -2007,7 +2535,7 @@ with open(meta_path, "w", encoding="utf-8") as f:
 psf_model_manager = PSFModelManager(
     config=actor_config,
     warp_frame_batch_size=10,
-    xy_jitter_pix=None,
+    xy_jitter_pix=actor_config["xy_jitter_pix"],
     intialize=True,
     build_jit_int_models=use_jitter_integrated_psf,
 )
@@ -2021,58 +2549,34 @@ psf_model = psf_model_manager.models[psf_field_id]
 simulator.observatory.store_variant_detectors(simulator.variant_manager)
 
 # ============================================================================
-# 调用 mk_real_field_stars 生成真实星场
-# ============================================================================
 
-from photsim6.field import mk_real_field_stars_2
+# ====== 仅用两步法选星，彻底移除adaptive查询 ======
 from photsim6.field import mk_real_field_stars_et_focalplane
 from astropy import units as u
 import numpy as np
 import pandas as pd
 
-# 从配置中获取参数
-pixel_scale = config_manager.parameters[
-    "Pixel Scale"
-]  # 像素尺度，例如: 4.83 arcsec/pix
-n_pixels = int(
-    config_manager.parameters["Detector Width"].to(u.pix).value
-)  # 探测器宽度，例如: 1001
+pixel_scale = config_manager.parameters["Pixel Scale"]
+n_pixels = int(config_manager.parameters["Detector Width"].to(u.pix).value)
+target_ra = float(FIELD_CENTER_RA_DEG)
+target_dec = float(FIELD_CENTER_DEC_DEG)
 
-# 从 tile_centers.csv 读取第一组中心坐标
-# 注意：如果文件不在当前目录，请修改路径
-# tile_csv_path = 'tile_centers.csv'  # 修改为实际路径，例如: '/path/to/tile_centers.csv'
-
-# tile_centers_df = pd.read_csv(tile_csv_path)
-# i = 1
-# first_tile = tile_centers_df.iloc[i]  # 第一行数据（第一组中心）
-
-# target_ra = first_tile['center_ra_deg']   # 赤经（度）
-# target_dec = first_tile['center_dec_deg'] # 赤纬（度）
-
-# 使用脚本顶部提供的“天区中心接口”，便于你快速改 4 批中心。
-target_ra = float(FIELD_CENTER_RA_DEG)  # 赤经（度）
-target_dec = float(FIELD_CENTER_DEC_DEG)  # 赤纬（度）
-
-star_data, guide_query_meta = query_guide_star_field_adaptive(
-    ra=target_ra * u.deg,  # 目标星赤经（转换为 Quantity）
-    dec=target_dec * u.deg,  # 目标星赤纬（转换为 Quantity）
-    px_cnt=n_pixels,  # 探测器像素数
-    px_scale=pixel_scale,  # 像素尺度
-    apply_offset=APPLY_STATIC_FIELD_OFFSET,  # 是否添加整幅星场静态偏移
-    plot=True,  # 仅在最终采用的查询深度上绘制星场图
+# 直接查 G<14 的所有星
+star_data = mk_real_field_stars_et_focalplane(
+    target_ra=target_ra * u.deg,
+    target_dec=target_dec * u.deg,
+    catalog_dir=GUIDE_GAIA_CATALOG_DIR,
+    registry_data_dir=ET_FOCALPLANE_DATA_DIR,
+    px_cnt=n_pixels,
+    apply_offset=APPLY_STATIC_FIELD_OFFSET,
+    mag_lim=14.0,
+    plot=True,
     offset_x_pix=STATIC_FIELD_OFFSET_X_PIX,
     offset_y_pix=STATIC_FIELD_OFFSET_Y_PIX,
-    base_gaia_gmag_lim=GAIA_GMAG_LIM,
-    min_catalog_stars=GUIDE_MIN_CATALOG_STARS,
-    gaia_gmag_step=GAIA_GMAG_LIM_STEP,
-    gaia_gmag_lim_max=GAIA_GMAG_LIM_MAX,
-    query_backend=GUIDE_STAR_QUERY_BACKEND,
-    catalog_dir=GUIDE_GAIA_CATALOG_DIR,
-    et_focalplane_data_dir=ET_FOCALPLANE_DATA_DIR,
-    et_focalplane_src_dir=ET_FOCALPLANE_SRC_DIR,
-    target_epoch=GUIDE_QUERY_TARGET_EPOCH,
-    crop_to_simulation_frame=GUIDE_QUERY_CROP_TO_SIM_FRAME,
-    crop_margin_pix=GUIDE_QUERY_CROP_MARGIN_PIX,
+    target_epoch=2000.0,
+    crop_to_simulation_frame=True,
+    crop_margin_pix=0.0,
+    et_focalplane_src=ET_FOCALPLANE_SRC_DIR,
 )
 star_data = enrich_star_data_truth_columns(star_data)
 
@@ -2098,27 +2602,7 @@ _meta.update(
         "guide_query_target_center_ypix_shifted": float(
             star_data.get("target_center_ypix_shifted", np.nan)
         ),
-        "guide_query_backend": str(guide_query_meta["query_backend"]),
-        "guide_query_detector_id": str(guide_query_meta["query_detector_id"]),
-        "guide_query_target_epoch": float(guide_query_meta["query_target_epoch"]),
-        "guide_query_base_gaia_gmag_lim": float(
-            guide_query_meta["query_base_gaia_gmag_lim"]
-        ),
-        "guide_query_final_gaia_gmag_lim": float(
-            guide_query_meta["query_final_gaia_gmag_lim"]
-        ),
-        "guide_query_gaia_gmag_step": float(guide_query_meta["query_gaia_gmag_step"]),
-        "guide_query_gaia_gmag_lim_max": float(
-            guide_query_meta["query_gaia_gmag_lim_max"]
-        ),
-        "guide_query_crop_to_simulation_frame": bool(
-            guide_query_meta["query_crop_to_simulation_frame"]
-        ),
-        "guide_query_crop_margin_pix": float(guide_query_meta["query_crop_margin_pix"]),
-        "guide_query_history": guide_query_meta["query_history"],
-        "guide_query_reached_min_star_target": bool(
-            guide_query_meta["query_reached_min_star_target"]
-        ),
+        # 已移除所有 guide_query_meta 相关内容，彻底清理遗留参数
     }
 )
 
@@ -2131,12 +2615,18 @@ stars = Stars()
 optical_eff_dpct = (
     simulator.sim_config["Optical Efficiency Ratio"].to(u.percent).value / 100
 )
+et_quantum_efficiency_dpct = 0.7
+if "ET Quantum Efficiency" in simulator.sim_config:
+    et_quantum_efficiency_dpct = (
+        simulator.sim_config["ET Quantum Efficiency"].to(u.percent).value / 100
+    )
 stars.build_catalog(
     star_data,
     simulator.time_manager.sim_exposure,
     optical_eff_dpct,
     simulator.relative_aperture_area,
     mag_type=simulator.mag_type,
+    et_quantum_efficiency=et_quantum_efficiency_dpct,
 )
 
 field_id = psf_field_id  # Which PSF ID to use? Keep catalog/ray generation consistent with the selected PSF.
@@ -2168,54 +2658,71 @@ star_df = stars.catalog
 print(n_stars)
 # star_df
 
-# ---------------------------------------------------------------------------
-# 导星星表规则：
-# 1) 先自适应加深 Gaia 查询，直到该视场至少有 GUIDE_MIN_CATALOG_STARS 颗星或达到查询上限；
-# 2) 最终只把最亮的若干颗送进仿真，受 MAX_SIM_STARS 限制；
-# 3) 若即使查到 GAIA_GMAG_LIM_MAX 仍不足目标星数，则给出明确告警。
-# ---------------------------------------------------------------------------
-try:
-    max_sim_stars = int(MAX_SIM_STARS) if MAX_SIM_STARS is not None else None
-except Exception:
-    max_sim_stars = None
 
-star_selection = select_guide_star_indices(
-    star_df=star_df,
-    min_catalog_stars=GUIDE_MIN_CATALOG_STARS,
-    max_sim_stars=max_sim_stars,
-)
-
-keep = star_selection["keep_indices"]
+# =================== 两步分组选星逻辑（仅保留新逻辑） ===================
+stars.catalog = star_df
+if "Gaia G Mag" not in star_df.colnames:
+    raise ValueError("星表缺少 'Gaia G Mag' 列，无法按 Gaia G 星等做筛选。")
+mags = np.asarray(star_df["Gaia G Mag"], dtype=float)
+n_available_catalog_stars = int(mags.size)
+all_idx = np.arange(mags.size, dtype=int)
+bright_mask = mags < GAIA_GMAG_LIM_MIN
+bright_idx = all_idx[bright_mask]
+faint_mask = mags >= GAIA_GMAG_LIM_MIN
+faint_idx = all_idx[faint_mask]
+keep = [0] if 0 in all_idx else []
+bright_sorted = bright_idx[np.argsort(mags[bright_idx])]
+bright_top = [idx for idx in bright_sorted if idx != 0][:GUIDE_TOP_BRIGHT]
+faint_sorted = faint_idx[np.argsort(mags[faint_idx])]
+faint_top = [idx for idx in faint_sorted if idx != 0][:GUIDE_TOP_FAINT]
+for idx in bright_top + faint_top:
+    if idx not in keep:
+        keep.append(idx)
+keep = np.array(keep, dtype=int)
 star_df = star_df[keep]
 star_data = _slice_star_data_by_indices(star_data, keep)
-stars.catalog = star_df
-
-
-simulator.star_data = star_data
-
-print(
-    "[Stars] "
-    f"Gaia query reached G <= {guide_query_meta['query_final_gaia_gmag_lim']:.1f}; "
-    f"returned {star_selection['n_available']} stars; "
-    f"selected {star_selection['n_selected']} for simulation"
-    + ("" if max_sim_stars is None else f" (MAX_SIM_STARS={max_sim_stars})")
-    + f"; faintest selected Kepler Mag = {star_selection['selected_faintest_mag']:.3f}."
+n_selected_catalog_stars = int(len(star_df))
+selected_faintest_gaia_g_mag = (
+    float(np.max(np.asarray(star_df["Gaia G Mag"], dtype=float)))
+    if n_selected_catalog_stars > 0
+    else None
 )
-
-if not star_selection["meets_min_count"]:
-    print(
-        "[Stars] WARNING: "
-        f"this sky field still has only {star_selection['n_available']} real stars "
-        f"inside the current 1.7 deg FOV even after relaxing Gaia to "
-        f"G <= {guide_query_meta['query_final_gaia_gmag_lim']:.1f}, "
-        f"so it cannot reach the requested minimum {GUIDE_MIN_CATALOG_STARS} stars."
-    )
-
+selected_faintest_kepler_mag = None
+if n_selected_catalog_stars > 0 and ("Kepler Mag" in star_df.colnames):
+    try:
+        selected_faintest_kepler_mag = float(
+            np.max(np.asarray(star_df["Kepler Mag"], dtype=float))
+        )
+    except Exception:
+        selected_faintest_kepler_mag = None
+guide_mask_in_sim = np.zeros(len(star_df), dtype=bool)
+for i, idx in enumerate(keep):
+    if idx in faint_top or (idx == 0 and 0 in faint_top):
+        guide_mask_in_sim[i] = True
+star_df["Guide Candidate"] = guide_mask_in_sim
+star_df["Guide Candidate Flag"] = guide_mask_in_sim.astype(np.int8)
+stars.catalog = star_df
+simulator.star_data = star_data
+print(
+    f"[Stars] Two-step selection: bright(G<{GAIA_GMAG_LIM_MIN}) top{GUIDE_TOP_BRIGHT} + faint(G>={GAIA_GMAG_LIM_MIN}) top{GUIDE_TOP_FAINT}; "
+    f"total used for simulation = {len(star_df)}; "
+    f"guide candidates (faint group) = {np.sum(guide_mask_in_sim)}; "
+    f"brightest G = {np.min(mags[keep]):.3f}; faintest G = {np.max(mags[keep]):.3f}."
+)
+if 0 not in keep:
+    print("[Stars] WARNING: target star(index=0)未被选入仿真星表！")
 truth_index = np.arange(len(star_df), dtype=np.int64)
 star_df["Truth Index"] = truth_index
 star_df["Star ID"] = truth_index
 star_df["FOV theta"] = np.full(len(star_df), target_star_angle, dtype=np.float64)
 stars.catalog = star_df
+guide_star_df = star_df[np.asarray(star_df["Guide Candidate"], dtype=bool)]
+try:
+    guide_star_df.write(opj(BATCH_DIR, "guide_candidates.ecsv"), overwrite=True)
+except Exception:
+    guide_star_df.to_pandas().to_csv(
+        opj(BATCH_DIR, "guide_candidates.csv"), index=False
+    )
 
 try:
     with open(meta_path, "r", encoding="utf-8") as f:
@@ -2228,12 +2735,13 @@ _meta.update(
         "n_truth_stars": int(len(star_df)),
         "field_polar_angle_rad": float(target_star_angle),
         "guide_catalog_min_star_target": int(GUIDE_MIN_CATALOG_STARS),
-        "guide_catalog_available_star_count": int(star_selection["n_available"]),
-        "guide_catalog_selected_star_count": int(star_selection["n_selected"]),
-        "guide_catalog_selected_faintest_kepler_mag": float(
-            star_selection["selected_faintest_mag"]
+        "guide_catalog_available_star_count": int(n_available_catalog_stars),
+        "guide_catalog_selected_star_count": int(n_selected_catalog_stars),
+        "guide_catalog_selected_faintest_kepler_mag": selected_faintest_kepler_mag,
+        "guide_catalog_selected_faintest_gaia_g_mag": selected_faintest_gaia_g_mag,
+        "guide_catalog_meets_min_star_target": bool(
+            n_available_catalog_stars >= int(GUIDE_MIN_CATALOG_STARS)
         ),
-        "guide_catalog_meets_min_star_target": bool(star_selection["meets_min_count"]),
     }
 )
 
@@ -2274,8 +2782,8 @@ psf_model.is_built = True
 
 -----------
 
-Part of the reason it takes so long is that the PSF of each star is evaluated across all subpixels of the entire image. This is
-highly inefficient since 99.999% of the star flux is within a 5 pixel radius circle of the centroid. Photsim was not designed to
+Part of the reason it takes so long is that the PSF of each star is evaluated across all subpixels of the entire image. This is 
+highly inefficient since 99.999% of the star flux is within a 5 pixel radius circle of the centroid. Photsim was not designed to 
 run in this way.
 """
 
